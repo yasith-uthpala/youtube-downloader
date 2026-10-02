@@ -46,6 +46,11 @@ class ModernYouTubeDownloader(ctk.CTk):
         # Link Grabber State
         self.grabbed_links = []  # list of dicts: { url, name, type, size_str, size_bytes, status }
 
+        # Playlist Downloader State
+        self.playlist_data = None
+        self.playlist_vars = {}
+        self.playlist_batch_active = False
+
         self._build_ui()
         self.select_tab("single")
 
@@ -87,6 +92,7 @@ class ModernYouTubeDownloader(ctk.CTk):
 
         nav_items = [
             ("single", "🎬  Single Downloader"),
+            ("playlist", "📑  Playlist Downloader"),
             ("grabber", "🧲  Link Grabber (Bulk)"),
             ("settings", "⚙️  Settings & Privacy"),
         ]
@@ -135,6 +141,7 @@ class ModernYouTubeDownloader(ctk.CTk):
 
         self.frames = {
             "single": self._build_single_downloader_frame(),
+            "playlist": self._build_playlist_downloader_frame(),
             "grabber": self._build_link_grabber_frame(),
             "settings": self._build_settings_frame()
         }
@@ -390,7 +397,192 @@ class ModernYouTubeDownloader(ctk.CTk):
         return container
 
     # ==========================================
-    # TAB 2: LINK GRABBER & BULK DOWNLOADER
+    # TAB 2: PLAYLIST DOWNLOADER
+    # ==========================================
+    def _build_playlist_downloader_frame(self):
+        container = ctk.CTkScrollableFrame(self.content_area, fg_color="transparent")
+
+        # 1. URL Input Card
+        input_card = ctk.CTkFrame(container, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1f2937")
+        input_card.pack(fill="x", padx=16, pady=16, ipady=4)
+
+        ctk.CTkLabel(
+            input_card,
+            text="📑  YouTube Playlist Downloader",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="#ffffff"
+        ).pack(anchor="w", padx=16, pady=(10, 2))
+
+        ctk.CTkLabel(
+            input_card,
+            text="Download entire YouTube playlists or selectively pick specific videos in MP4 video or MP3 audio:",
+            font=ctk.CTkFont(size=11),
+            text_color="#94a3b8"
+        ).pack(anchor="w", padx=16, pady=(0, 10))
+
+        # Input row
+        in_row = ctk.CTkFrame(input_card, fg_color="transparent")
+        in_row.pack(fill="x", padx=16, pady=(0, 6))
+
+        self.playlist_url_entry = ctk.CTkEntry(
+            in_row,
+            placeholder_text="Paste YouTube Playlist URL (e.g. https://www.youtube.com/playlist?list=...)",
+            height=40,
+            font=ctk.CTkFont(size=12),
+            fg_color="#030712",
+            border_color="#374151"
+        )
+        self.playlist_url_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.playlist_url_entry.bind("<Return>", lambda event: self.fetch_playlist_info())
+
+        paste_btn = ctk.CTkButton(
+            in_row,
+            text="📋 Paste",
+            width=75,
+            height=40,
+            font=ctk.CTkFont(size=12),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            command=self._paste_playlist_url
+        )
+        paste_btn.pack(side="left", padx=(0, 8))
+
+        self.fetch_playlist_btn = ctk.CTkButton(
+            in_row,
+            text="🔍 Fetch Playlist",
+            width=140,
+            height=40,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#ef4444",
+            hover_color="#dc2626",
+            command=self.fetch_playlist_info
+        )
+        self.fetch_playlist_btn.pack(side="left")
+
+        self.playlist_status_lbl = ctk.CTkLabel(
+            input_card,
+            text="Enter a playlist URL and click 'Fetch Playlist' to load all videos.",
+            font=ctk.CTkFont(size=11),
+            text_color="#94a3b8"
+        )
+        self.playlist_status_lbl.pack(anchor="w", padx=16, pady=(2, 8))
+
+        # 2. Playlist Package Card (Initially Hidden)
+        self.playlist_package_card = ctk.CTkFrame(container, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1f2937")
+        # Hidden initially; packed dynamically after fetch
+
+        # Package Header
+        pkg_top = ctk.CTkFrame(self.playlist_package_card, fg_color="transparent")
+        pkg_top.pack(fill="x", padx=16, pady=(12, 6))
+
+        self.playlist_title_lbl = ctk.CTkLabel(
+            pkg_top,
+            text="Playlist Title",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color="#ffffff",
+            anchor="w"
+        )
+        self.playlist_title_lbl.pack(anchor="w")
+
+        self.playlist_meta_lbl = ctk.CTkLabel(
+            pkg_top,
+            text="Channel • Total Videos • Selected: 0",
+            font=ctk.CTkFont(size=11),
+            text_color="#94a3b8",
+            anchor="w"
+        )
+        self.playlist_meta_lbl.pack(anchor="w", pady=(2, 6))
+
+        # Controls Bar (Format, Quality, Select All, Download Selected)
+        ctrl_bar = ctk.CTkFrame(self.playlist_package_card, fg_color="#030712", corner_radius=8, height=48)
+        ctrl_bar.pack(fill="x", padx=16, pady=(0, 10))
+
+        # Select All / Deselect All
+        self.select_all_btn = ctk.CTkButton(
+            ctrl_bar,
+            text="Deselect All",
+            width=95,
+            height=30,
+            font=ctk.CTkFont(size=11),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            command=self._toggle_select_all_playlist
+        )
+        self.select_all_btn.pack(side="left", padx=(10, 8), pady=8)
+
+        # Mode Selector (Video MP4 vs Audio MP3 vs Audio M4A)
+        ctk.CTkLabel(ctrl_bar, text="Format:", font=ctk.CTkFont(size=11), text_color="#cbd5e1").pack(side="left", padx=(4, 4))
+        self.playlist_format_menu = ctk.CTkOptionMenu(
+            ctrl_bar,
+            values=["🎬 MP4 Video", "🎵 MP3 (320k)", "🎵 M4A Audio"],
+            width=130,
+            height=30,
+            font=ctk.CTkFont(size=11),
+            fg_color="#1f2937",
+            button_color="#374151",
+            command=self._on_playlist_format_changed
+        )
+        self.playlist_format_menu.pack(side="left", padx=(0, 10))
+
+        # Quality Selector (for video)
+        self.playlist_quality_lbl = ctk.CTkLabel(ctrl_bar, text="Quality:", font=ctk.CTkFont(size=11), text_color="#cbd5e1")
+        self.playlist_quality_lbl.pack(side="left", padx=(0, 4))
+        self.playlist_quality_menu = ctk.CTkOptionMenu(
+            ctrl_bar,
+            values=["Best Available", "1080p Full HD", "720p HD", "480p", "360p"],
+            width=120,
+            height=30,
+            font=ctk.CTkFont(size=11),
+            fg_color="#1f2937",
+            button_color="#374151"
+        )
+        self.playlist_quality_menu.pack(side="left", padx=(0, 10))
+
+        # Create subfolder checkbox
+        self.playlist_subfolder_cb = ctk.CTkCheckBox(
+            ctrl_bar,
+            text="Save in Subfolder",
+            font=ctk.CTkFont(size=11),
+            fg_color="#ef4444",
+            text_color="#e2e8f0"
+        )
+        self.playlist_subfolder_cb.select()
+        self.playlist_subfolder_cb.pack(side="left", padx=(0, 10))
+
+        # Download Selected Button
+        self.playlist_dl_btn = ctk.CTkButton(
+            ctrl_bar,
+            text="⬇ Download Selected",
+            width=175,
+            height=32,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#059669",
+            hover_color="#047857",
+            command=self.start_playlist_download
+        )
+        self.playlist_dl_btn.pack(side="right", padx=(0, 10))
+
+        # Stop Button
+        self.playlist_stop_btn = ctk.CTkButton(
+            ctrl_bar,
+            text="■ Stop Batch",
+            width=100,
+            height=32,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#991b1b",
+            hover_color="#7f1d1d",
+            command=self.stop_playlist_batch
+        )
+        # Hidden by default
+
+        # Videos List Container
+        self.playlist_items_frame = ctk.CTkFrame(self.playlist_package_card, fg_color="transparent")
+        self.playlist_items_frame.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+
+        return container
+
+    # ==========================================
+    # TAB 3: LINK GRABBER & BULK DOWNLOADER
     # ==========================================
     def _build_link_grabber_frame(self):
         container = ctk.CTkScrollableFrame(self.content_area, fg_color="transparent")
@@ -735,6 +927,15 @@ class ModernYouTubeDownloader(ctk.CTk):
             self.status_lbl.configure(text="Please enter or paste a valid YouTube URL.", text_color="#f87171")
             return
 
+        # Auto-detect playlist URL
+        if "playlist?list=" in url or ("&list=" in url and not "v=" in url):
+            self.status_lbl.configure(text="💡 Detected YouTube Playlist! Switching to Playlist Downloader...", text_color="#38bdf8")
+            self.playlist_url_entry.delete(0, "end")
+            self.playlist_url_entry.insert(0, url)
+            self.select_tab("playlist")
+            self.fetch_playlist_info()
+            return
+
         self.fetch_btn.configure(state="disabled", text="Analyzing...")
         self.status_lbl.configure(text="Extracting video formats, 60 FPS options, and audio streams...", text_color="#fbbf24")
 
@@ -920,6 +1121,456 @@ class ModernYouTubeDownloader(ctk.CTk):
                 return lambda: self.start_download(self.current_video_data['url'], 'audio', fid, ext, title, f"audio_{ext}", dl_btn)
 
             dl_btn.configure(command=make_audio_cmd())
+
+    # ==========================================
+    # LOGIC: PLAYLIST DOWNLOADER
+    # ==========================================
+    def _paste_playlist_url(self):
+        try:
+            clipboard = self.clipboard_get().strip()
+            if clipboard:
+                self.playlist_url_entry.delete(0, "end")
+                self.playlist_url_entry.insert(0, clipboard)
+                self.fetch_playlist_info()
+        except Exception:
+            pass
+
+    def fetch_playlist_info(self):
+        url = self.playlist_url_entry.get().strip()
+        if not url:
+            self.playlist_status_lbl.configure(text="Please enter or paste a valid YouTube Playlist URL.", text_color="#f87171")
+            return
+
+        self.fetch_playlist_btn.configure(state="disabled", text="Fetching Videos...")
+        self.playlist_status_lbl.configure(text="Connecting to YouTube & reading playlist entries (fast mode)...", text_color="#38bdf8")
+
+        auth_config = self._get_auth_config()
+
+        def worker():
+            try:
+                data = ytdlp_service.extract_playlist_info(url, auth_config)
+                self.after(0, lambda: self._on_playlist_fetched(data))
+            except Exception as e:
+                err_msg = str(e)
+                if "Sign in to confirm" in err_msg or "confirm you're not a bot" in err_msg:
+                    err_msg = "YouTube anti-bot check triggered. You can enable Login under Settings to capture this playlist."
+                self.after(0, lambda: self._on_playlist_error(err_msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_playlist_fetched(self, data):
+        self.fetch_playlist_btn.configure(state="normal", text="🔍 Fetch Playlist")
+        self.playlist_data = data
+        total = data.get('total_count', 0)
+        title = data.get('title', 'YouTube Playlist')
+        uploader = data.get('uploader', 'Unknown Channel')
+
+        if total == 0:
+            self.playlist_status_lbl.configure(text="Playlist fetched but contained no playable videos.", text_color="#f87171")
+            return
+
+        self.playlist_status_lbl.configure(
+            text=f"✓ Successfully loaded {total} videos from '{title}'",
+            text_color="#34d399"
+        )
+        self.playlist_title_lbl.configure(text=f"📑  {title}")
+        self.playlist_meta_lbl.configure(text=f"Channel: {uploader}   •   Total Videos: {total}   •   Selected: {total} / {total}")
+
+        # Pack package card if not packed
+        if not self.playlist_package_card.winfo_ismapped():
+            self.playlist_package_card.pack(fill="x", padx=16, pady=(0, 16))
+
+        self._render_playlist_videos()
+
+    def _on_playlist_error(self, err_msg):
+        self.fetch_playlist_btn.configure(state="normal", text="🔍 Fetch Playlist")
+        self.playlist_status_lbl.configure(text=f"Failed to fetch playlist: {err_msg}", text_color="#f87171")
+
+    def _render_playlist_videos(self):
+        for child in self.playlist_items_frame.winfo_children():
+            child.destroy()
+
+        self.playlist_vars = {}
+        if not self.playlist_data or not self.playlist_data.get('videos'):
+            return
+
+        for idx, item in enumerate(self.playlist_data['videos']):
+            row = ctk.CTkFrame(self.playlist_items_frame, fg_color="#0f172a", corner_radius=8, border_width=1, border_color="#1f2937")
+            row.pack(fill="x", pady=4, padx=2)
+
+            # Checkbox
+            var = ctk.BooleanVar(value=True)
+            self.playlist_vars[idx] = var
+            cb = ctk.CTkCheckBox(
+                row,
+                text="",
+                variable=var,
+                width=24,
+                checkbox_width=20,
+                checkbox_height=20,
+                fg_color="#ef4444",
+                hover_color="#dc2626",
+                command=self._update_playlist_selection_counter
+            )
+            cb.pack(side="left", padx=(10, 6), pady=8)
+
+            # Index Badge
+            idx_badge = ctk.CTkLabel(
+                row,
+                text=f"#{item.get('index', idx+1):02d}",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                text_color="#64748b",
+                width=34
+            )
+            idx_badge.pack(side="left", padx=(0, 6))
+
+            # Details: Title & Meta
+            text_frame = ctk.CTkFrame(row, fg_color="transparent")
+            text_frame.pack(side="left", fill="x", expand=True, padx=(4, 10), pady=6)
+
+            raw_title = item.get('title', f"Video #{idx+1}")
+            display_title = (raw_title[:75] + '...') if len(raw_title) > 75 else raw_title
+            title_lbl = ctk.CTkLabel(
+                text_frame,
+                text=display_title,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                text_color="#f1f5f9",
+                anchor="w"
+            )
+            title_lbl.pack(anchor="w")
+
+            dur_str = item.get('duration_str', '--:--')
+            up_str = item.get('uploader') or self.playlist_data.get('uploader', '')
+            meta_str = f"Duration: {dur_str}"
+            if up_str:
+                meta_str += f"   •   {up_str}"
+
+            meta_lbl = ctk.CTkLabel(
+                text_frame,
+                text=meta_str,
+                font=ctk.CTkFont(size=10),
+                text_color="#94a3b8",
+                anchor="w"
+            )
+            meta_lbl.pack(anchor="w", pady=(1, 0))
+
+            # Status Label
+            status_lbl = ctk.CTkLabel(
+                row,
+                text="Ready",
+                font=ctk.CTkFont(size=11),
+                text_color="#94a3b8",
+                width=110,
+                anchor="e"
+            )
+            status_lbl.pack(side="left", padx=8)
+            item['status_lbl'] = status_lbl
+
+            # Preview Button
+            v_url = item.get('url', '')
+            play_btn = ctk.CTkButton(
+                row,
+                text="▶ Play",
+                width=65,
+                height=28,
+                font=ctk.CTkFont(size=11),
+                fg_color="#1e293b",
+                hover_color="#334155",
+                command=lambda u=v_url: webbrowser.open(u) if u else None
+            )
+            play_btn.pack(side="right", padx=(4, 10), pady=6)
+
+            # Single Video Download Button
+            dl_btn = ctk.CTkButton(
+                row,
+                text="⬇ Download",
+                width=95,
+                height=28,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="#1f2937",
+                hover_color="#dc2626",
+                command=lambda item_idx=idx: self.start_single_playlist_video_download(item_idx)
+            )
+            dl_btn.pack(side="right", padx=(4, 4), pady=6)
+            item['dl_btn'] = dl_btn
+
+        self._update_playlist_selection_counter()
+
+    def _toggle_select_all_playlist(self):
+        if not self.playlist_vars:
+            return
+        all_selected = all(v.get() for v in self.playlist_vars.values())
+        new_val = not all_selected
+        for v in self.playlist_vars.values():
+            v.set(new_val)
+        self._update_playlist_selection_counter()
+
+    def _update_playlist_selection_counter(self):
+        if not self.playlist_vars or not self.playlist_data:
+            return
+        selected_count = sum(1 for v in self.playlist_vars.values() if v.get())
+        total = len(self.playlist_vars)
+        uploader = self.playlist_data.get('uploader', 'Unknown Channel')
+
+        self.playlist_meta_lbl.configure(
+            text=f"Channel: {uploader}   •   Total Videos: {total}   •   Selected: {selected_count} / {total}"
+        )
+
+        if selected_count == total:
+            self.select_all_btn.configure(text="Deselect All")
+        else:
+            self.select_all_btn.configure(text="Select All")
+
+        self.playlist_dl_btn.configure(text=f"⬇ Download Selected ({selected_count})")
+        if selected_count == 0:
+            self.playlist_dl_btn.configure(state="disabled")
+        else:
+            self.playlist_dl_btn.configure(state="normal")
+
+    def _on_playlist_format_changed(self, choice):
+        if "MP3" in choice or "Audio" in choice:
+            self.playlist_quality_lbl.pack_forget()
+            self.playlist_quality_menu.pack_forget()
+        else:
+            # Re-pack before subfolder checkbox
+            self.playlist_quality_lbl.pack(side="left", padx=(0, 4), before=self.playlist_subfolder_cb)
+            self.playlist_quality_menu.pack(side="left", padx=(0, 10), before=self.playlist_subfolder_cb)
+
+    def _get_playlist_download_folder(self):
+        if self.playlist_subfolder_cb.get() and self.playlist_data:
+            raw_title = self.playlist_data.get('title', 'YouTube Playlist')
+            # Clean folder name for Windows
+            clean_title = re.sub(r'[\\/*?:"<>|]', "", raw_title).strip()
+            if not clean_title:
+                clean_title = "Playlist"
+            folder = os.path.join(self.download_destination, clean_title[:60])
+        else:
+            folder = self.download_destination
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+    def _get_playlist_format_params(self):
+        fmt_choice = self.playlist_format_menu.get()
+        if "MP3" in fmt_choice:
+            return "audio", "bestaudio/best", "mp3", "MP3 320k"
+        elif "M4A" in fmt_choice:
+            return "audio", "bestaudio/best", "m4a", "M4A Audio"
+        else:
+            # MP4 Video
+            qual_choice = self.playlist_quality_menu.get()
+            if "1080p" in qual_choice:
+                fid = "bestvideo[height<=1080]+bestaudio/best"
+                lbl = "1080p Full HD"
+            elif "720p" in qual_choice:
+                fid = "bestvideo[height<=720]+bestaudio/best"
+                lbl = "720p HD"
+            elif "480p" in qual_choice:
+                fid = "bestvideo[height<=480]+bestaudio/best"
+                lbl = "480p"
+            elif "360p" in qual_choice:
+                fid = "bestvideo[height<=360]+bestaudio/best"
+                lbl = "360p"
+            else:
+                fid = "best"
+                lbl = "Best Available"
+            return "video", fid, "mp4", lbl
+
+    def start_playlist_download(self):
+        if not self.playlist_data or not self.playlist_data.get('videos'):
+            return
+
+        selected_indices = [idx for idx, v in self.playlist_vars.items() if v.get()]
+        if not selected_indices:
+            self.playlist_status_lbl.configure(text="Please select at least one video to download.", text_color="#fbbf24")
+            return
+
+        self.playlist_batch_active = True
+        self.playlist_dl_btn.pack_forget()
+        self.playlist_stop_btn.pack(side="right", padx=(0, 10))
+
+        # Show bottom dock
+        self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
+
+        target_folder = self._get_playlist_download_folder()
+        dl_type, format_id, ext, quality_label = self._get_playlist_format_params()
+        auth_config = self._get_auth_config()
+
+        def batch_worker():
+            total = len(selected_indices)
+            for step, idx in enumerate(selected_indices):
+                if not self.playlist_batch_active:
+                    break
+
+                item = self.playlist_data['videos'][idx]
+                if item.get('status') == 'Completed':
+                    continue
+
+                u = item['url']
+                v_title = item.get('title', f"Video #{idx+1}")
+
+                self.after(0, lambda s=step+1, tot=total, t=v_title: (
+                    self.dock_title_lbl.configure(text=f"[{s}/{tot}] {t[:40]}... [{quality_label}]"),
+                    self.dock_status_lbl.configure(text="Initializing download with FFmpeg..."),
+                    self.dock_percent_lbl.configure(text="0%"),
+                    self.dock_progress.set(0.0)
+                ))
+
+                t_id = ytdlp_service.start_download_task(
+                    url=u,
+                    download_type=dl_type,
+                    format_id=format_id,
+                    audio_ext=ext,
+                    auth_config=auth_config,
+                    quality_label=quality_label,
+                    destination_dir=target_folder
+                )
+                self.active_task_id = t_id
+                self.tracking_active = True
+
+                while self.playlist_batch_active:
+                    t = ytdlp_service.get_task_status(t_id)
+                    if not t:
+                        break
+                    st = t.get('status')
+                    pct = t.get('progress', 0.0)
+                    speed = t.get('speed', '--')
+                    eta = t.get('eta', '--')
+
+                    self.after(0, lambda s=st, p=pct, sp=speed, it=item: self._update_playlist_item_status(it, s, p, sp))
+                    self.after(0, lambda p=pct/100.0, pi=int(pct), sp=speed, e=eta, s=st: self._update_dock_ui(p, pi, sp, e, s))
+
+                    if st in ['completed', 'error', 'cancelled']:
+                        if st == 'completed':
+                            item['status'] = 'Completed'
+                            self.after(0, lambda it=item: self._on_playlist_item_success(it))
+                        elif st == 'error':
+                            err = t.get('error', 'Error')
+                            item['status'] = 'Failed'
+                            self.after(0, lambda it=item, er=err: self._on_playlist_item_error(it, er))
+                        break
+                    time.sleep(0.5)
+
+                if not self.playlist_batch_active:
+                    ytdlp_service.cancel_task(t_id)
+                    break
+
+            # Batch ended
+            self.playlist_batch_active = False
+            self.active_task_id = None
+            self.after(0, lambda: (
+                self.playlist_stop_btn.pack_forget(),
+                self.playlist_dl_btn.pack(side="right", padx=(0, 10)),
+                self.dock_status_lbl.configure(text=f"Batch complete! Saved into: {os.path.basename(target_folder)}"),
+                self.open_custom_downloads_folder(target_folder)
+            ))
+
+        threading.Thread(target=batch_worker, daemon=True).start()
+
+    def stop_playlist_batch(self):
+        self.playlist_batch_active = False
+        if self.active_task_id:
+            ytdlp_service.cancel_task(self.active_task_id)
+        self.dock_status_lbl.configure(text="Batch download stopped by user.")
+        self.playlist_stop_btn.pack_forget()
+        self.playlist_dl_btn.pack(side="right", padx=(0, 10))
+
+    def start_single_playlist_video_download(self, item_index):
+        if not self.playlist_data or item_index >= len(self.playlist_data.get('videos', [])):
+            return
+
+        item = self.playlist_data['videos'][item_index]
+        u = item['url']
+        v_title = item.get('title', f"Video #{item_index+1}")
+
+        target_folder = self._get_playlist_download_folder()
+        dl_type, format_id, ext, quality_label = self._get_playlist_format_params()
+        auth_config = self._get_auth_config()
+
+        # Update button to downloading state
+        btn = item.get('dl_btn')
+        if btn:
+            btn.configure(text="Downloading...", state="disabled", fg_color="#78350f")
+
+        self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
+        self.dock_title_lbl.configure(text=f"Downloading: {v_title[:45]}... [{quality_label}]")
+        self.dock_status_lbl.configure(text="Initializing download with FFmpeg...")
+        self.dock_percent_lbl.configure(text="0%")
+        self.dock_progress.set(0.0)
+
+        def single_worker():
+            t_id = ytdlp_service.start_download_task(
+                url=u,
+                download_type=dl_type,
+                format_id=format_id,
+                audio_ext=ext,
+                auth_config=auth_config,
+                quality_label=quality_label,
+                destination_dir=target_folder
+            )
+            self.active_task_id = t_id
+            self.tracking_active = True
+
+            while True:
+                t = ytdlp_service.get_task_status(t_id)
+                if not t:
+                    break
+                st = t.get('status')
+                pct = t.get('progress', 0.0)
+                speed = t.get('speed', '--')
+                eta = t.get('eta', '--')
+
+                self.after(0, lambda s=st, p=pct, sp=speed, it=item: self._update_playlist_item_status(it, s, p, sp))
+                self.after(0, lambda p=pct/100.0, pi=int(pct), sp=speed, e=eta, s=st: self._update_dock_ui(p, pi, sp, e, s))
+
+                if st in ['completed', 'error', 'cancelled']:
+                    self.tracking_active = False
+                    if st == 'completed':
+                        item['status'] = 'Completed'
+                        self.after(0, lambda it=item: self._on_playlist_item_success(it))
+                        self.after(0, lambda f=target_folder: self.open_custom_downloads_folder(f))
+                    elif st == 'error':
+                        err = t.get('error', 'Error')
+                        item['status'] = 'Failed'
+                        self.after(0, lambda it=item, er=err: self._on_playlist_item_error(it, er))
+                    break
+                time.sleep(0.5)
+
+        threading.Thread(target=single_worker, daemon=True).start()
+
+    def _update_playlist_item_status(self, item, status, pct, speed):
+        lbl = item.get('status_lbl')
+        if lbl:
+            if status == 'downloading':
+                lbl.configure(text=f"{int(pct)}% ({speed})", text_color="#38bdf8")
+            elif status == 'processing':
+                lbl.configure(text="Merging...", text_color="#fbbf24")
+            elif status == 'completed':
+                lbl.configure(text="✓ Done", text_color="#34d399")
+            elif status == 'error':
+                lbl.configure(text="Failed", text_color="#f87171")
+
+    def _on_playlist_item_success(self, item):
+        if 'dl_btn' in item and item['dl_btn']:
+            item['dl_btn'].configure(text="✓ Done", state="disabled", fg_color="#064e3b")
+        if 'status_lbl' in item and item['status_lbl']:
+            item['status_lbl'].configure(text="✓ Saved", text_color="#34d399")
+        self.dock_status_lbl.configure(text=f"✓ Downloaded: {item['title'][:40]}")
+
+    def _on_playlist_item_error(self, item, err):
+        if 'status_lbl' in item and item['status_lbl']:
+            item['status_lbl'].configure(text="Failed", text_color="#f87171")
+        if 'dl_btn' in item and item['dl_btn']:
+            item['dl_btn'].configure(text="Retry", state="normal", fg_color="#1f2937")
+        self.dock_status_lbl.configure(text=f"Error: {err}")
+
+    def open_custom_downloads_folder(self, folder_path):
+        try:
+            if folder_path and os.path.exists(folder_path):
+                os.startfile(folder_path)
+            else:
+                self.open_downloads_folder()
+        except Exception:
+            self.open_downloads_folder()
 
     # ==========================================
     # LOGIC: LINK GRABBER (BULK / GAMES / ZIP)

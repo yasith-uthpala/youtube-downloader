@@ -288,19 +288,28 @@ def extract_video_info(url: str, auth_config: Optional[Dict[str, Any]] = None) -
         'total_video_options': len(video_formats),
     }
 
-def clean_task_files(task_id: str):
+def clean_task_files(task_id: str, folder: Optional[str] = None):
     """Deletes any partial or temporary files associated with a task_id."""
-    try:
-        for fname in os.listdir(DOWNLOADS_DIR):
-            if fname.startswith(task_id):
-                file_to_del = os.path.join(DOWNLOADS_DIR, fname)
-                try:
-                    if os.path.isfile(file_to_del):
-                        os.remove(file_to_del)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    folders_to_check = [DOWNLOADS_DIR]
+    if folder and folder not in folders_to_check and os.path.isdir(folder):
+        folders_to_check.append(folder)
+    with tasks_lock:
+        dest = tasks.get(task_id, {}).get('destination_dir')
+        if dest and dest not in folders_to_check and os.path.isdir(dest):
+            folders_to_check.append(dest)
+
+    for fdir in folders_to_check:
+        try:
+            for fname in os.listdir(fdir):
+                if fname.startswith(task_id):
+                    file_to_del = os.path.join(fdir, fname)
+                    try:
+                        if os.path.isfile(file_to_del):
+                            os.remove(file_to_del)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
 def cancel_task(task_id: str) -> bool:
     """Cancels a running or queued download task and deletes partial files."""
@@ -316,7 +325,7 @@ def cancel_task(task_id: str) -> bool:
     threading.Thread(target=clean_task_files, args=(task_id,), daemon=True).start()
     return True
 
-def _download_worker(task_id: str, url: str, download_type: str, format_id: str, audio_ext: str, auth_config: Optional[Dict[str, Any]]):
+def _download_worker(task_id: str, url: str, download_type: str, format_id: str, audio_ext: str, auth_config: Optional[Dict[str, Any]], destination_dir: Optional[str] = None):
     with tasks_lock:
         tasks[task_id]['status'] = 'downloading'
         tasks[task_id]['progress'] = 0.0
@@ -360,12 +369,19 @@ def _download_worker(task_id: str, url: str, download_type: str, format_id: str,
     ydl_opts['progress_hooks'] = [progress_hook]
     ydl_opts['quiet'] = False
     
-    outtmpl = os.path.join(DOWNLOADS_DIR, f"{task_id}_%(title).100s.%(ext)s")
+    save_folder = destination_dir if destination_dir else DOWNLOADS_DIR
+    try:
+        os.makedirs(save_folder, exist_ok=True)
+    except Exception:
+        save_folder = DOWNLOADS_DIR
+    outtmpl = os.path.join(save_folder, f"{task_id}_%(title).100s.%(ext)s")
     ydl_opts['outtmpl'] = outtmpl
 
     if download_type == 'video':
-        if format_id == 'best':
+        if not format_id or format_id == 'best':
             ydl_opts['format'] = 'bestvideo+bestaudio/best'
+        elif '+' in format_id or 'bestvideo' in format_id:
+            ydl_opts['format'] = format_id
         else:
             ydl_opts['format'] = f"{format_id}+bestaudio/best"
         ydl_opts['merge_output_format'] = 'mp4'
@@ -397,13 +413,13 @@ def _download_worker(task_id: str, url: str, download_type: str, format_id: str,
 
         with tasks_lock:
             if tasks[task_id].get('cancelled'):
-                clean_task_files(task_id)
+                clean_task_files(task_id, save_folder)
                 return
 
         matched_file = None
-        for filename in os.listdir(DOWNLOADS_DIR):
+        for filename in os.listdir(save_folder):
             if filename.startswith(task_id) and not filename.endswith('.part'):
-                matched_file = os.path.join(DOWNLOADS_DIR, filename)
+                matched_file = os.path.join(save_folder, filename)
                 break
 
         if matched_file and os.path.exists(matched_file):
@@ -421,14 +437,14 @@ def _download_worker(task_id: str, url: str, download_type: str, format_id: str,
             raise Exception("Output file was not found after processing.")
 
     except DownloadCancelledException:
-        clean_task_files(task_id)
+        clean_task_files(task_id, save_folder)
         with tasks_lock:
             tasks[task_id]['status'] = 'cancelled'
             tasks[task_id]['message'] = 'Download cancelled by user.'
     except Exception as e:
         with tasks_lock:
             if tasks[task_id].get('cancelled'):
-                clean_task_files(task_id)
+                clean_task_files(task_id, save_folder)
                 return
         err_msg = str(e)
         if "Sign in to confirm" in err_msg or "confirm you're not a bot" in err_msg:
@@ -444,7 +460,8 @@ def start_download_task(
     format_id: str = "best",
     audio_ext: str = "mp3",
     auth_config: Optional[Dict[str, Any]] = None,
-    quality_label: str = ""
+    quality_label: str = "",
+    destination_dir: Optional[str] = None
 ) -> str:
     """Spawns an asynchronous download task and returns its task_id."""
     task_id = str(uuid.uuid4())[:8]
@@ -455,6 +472,7 @@ def start_download_task(
             'type': download_type,
             'format_id': format_id,
             'quality_label': quality_label,
+            'destination_dir': destination_dir,
             'status': 'queued',
             'progress': 0.0,
             'speed': '0 KB/s',
@@ -471,7 +489,7 @@ def start_download_task(
 
     t = threading.Thread(
         target=_download_worker,
-        args=(task_id, url, download_type, format_id, audio_ext, auth_config),
+        args=(task_id, url, download_type, format_id, audio_ext, auth_config, destination_dir),
         daemon=True
     )
     t.start()
@@ -480,6 +498,53 @@ def start_download_task(
 def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
     with tasks_lock:
         return tasks.get(task_id)
+
+def extract_playlist_info(url: str, auth_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Extracts all videos from a YouTube playlist quickly with extract_flat."""
+    ydl_opts = get_base_ydl_opts(auth_config)
+    ydl_opts['extract_flat'] = 'in_playlist'
+    ydl_opts['dump_single_json'] = True
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    title = info.get('title', 'Unknown Playlist')
+    uploader = info.get('uploader') or info.get('channel', 'Unknown Creator')
+    raw_entries = info.get('entries', []) or []
+    
+    videos = []
+    for idx, e in enumerate(raw_entries):
+        if not e:
+            continue
+        v_id = e.get('id')
+        v_url = e.get('url') or (f"https://www.youtube.com/watch?v={v_id}" if v_id else "")
+        dur = e.get('duration') or 0
+        dur_str = format_duration(dur) if dur else "--:--"
+        
+        thumbs = e.get('thumbnails', [])
+        thumb_url = thumbs[-1].get('url') if thumbs else (f"https://i.ytimg.com/vi/{v_id}/mqdefault.jpg" if v_id else None)
+        
+        videos.append({
+            'index': idx + 1,
+            'id': v_id,
+            'url': v_url,
+            'title': e.get('title', f'Video #{idx + 1}'),
+            'duration': dur,
+            'duration_str': dur_str,
+            'uploader': e.get('uploader') or uploader,
+            'thumbnail': thumb_url,
+            'selected': True,
+            'status': 'Ready'
+        })
+
+    return {
+        'id': info.get('id'),
+        'title': title,
+        'uploader': uploader,
+        'total_count': len(videos),
+        'videos': videos,
+        'url': url
+    }
 
 def unpack_paste_urls(input_url: str) -> List[str]:
     """
