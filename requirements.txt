@@ -6,3 +6,5 @@ fastapi>=0.141.1
 uvicorn>=0.53.0
 python-multipart>=0.0.32
 pywebview>=6.2.1
+pbincli>=0.3.7
+pycryptodome>=3.23.0

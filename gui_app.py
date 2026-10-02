@@ -5,6 +5,8 @@ import time
 import io
 import re
 import urllib.request
+import urllib.parse
+import webbrowser
 from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageTk
@@ -457,7 +459,7 @@ class ModernYouTubeDownloader(ctk.CTk):
 
         self.start_all_btn = ctk.CTkButton(
             tbl_header,
-            text="▶ Start All Downloads",
+            text="⬇ Download All Items",
             width=160,
             height=32,
             font=ctk.CTkFont(size=12, weight="bold"),
@@ -465,7 +467,19 @@ class ModernYouTubeDownloader(ctk.CTk):
             hover_color="#047857",
             command=self.start_all_grabbed_downloads
         )
-        self.start_all_btn.pack(side="right")
+        self.start_all_btn.pack(side="right", padx=(8, 0))
+
+        self.open_all_btn = ctk.CTkButton(
+            tbl_header,
+            text="🌐 Open All in Browser",
+            width=150,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            command=self.open_all_grabbed_in_browser
+        )
+        self.open_all_btn.pack(side="right")
 
         self.grabbed_items_frame = ctk.CTkFrame(self.grabbed_table_card, fg_color="transparent")
         self.grabbed_items_frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
@@ -895,54 +909,84 @@ class ModernYouTubeDownloader(ctk.CTk):
     # ==========================================
     def parse_and_grab_links(self):
         text = self.bulk_text.get("1.0", "end")
-        # Extract all URLs using regex
-        urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', text)
-        urls = list(dict.fromkeys(urls)) # deduplicate
+        raw_urls = re.findall(r'https?://[^\s<>"]+|www\.[^\s<>"]+', text)
+        raw_urls = list(dict.fromkeys(raw_urls))
 
-        if not urls:
+        if not raw_urls:
             self.grabber_status_lbl.configure(text="No valid URLs found in text.", text_color="#f87171")
             return
 
-        self.grabber_status_lbl.configure(text=f"Analyzing {len(urls)} links...", text_color="#fbbf24")
+        self.grabber_status_lbl.configure(text=f"Analyzing {len(raw_urls)} links & unpacking paste containers...", text_color="#fbbf24")
+        threading.Thread(target=self._inspect_links_worker, args=(raw_urls,), daemon=True).start()
 
-        # Run inspect in thread
-        threading.Thread(target=self._inspect_links_worker, args=(urls,), daemon=True).start()
+    def _inspect_links_worker(self, raw_urls):
+        expanded_urls = []
+        for u in raw_urls:
+            # Check if this is a PrivateBin / FitGirl paste URL
+            if "paste" in u or ("?" in u and "#" in u):
+                unpacked = ytdlp_service.unpack_paste_urls(u)
+                if unpacked and len(unpacked) > 1:
+                    expanded_urls.extend(unpacked)
+                    continue
+            expanded_urls.append(u)
 
-    def _inspect_links_worker(self, urls):
+        expanded_urls = list(dict.fromkeys(expanded_urls))
         self.grabbed_links = []
-        for u in urls:
+
+        for u in expanded_urls:
             is_yt = "youtube.com" in u or "youtu.be" in u
             name = u
             size_str = "Checking..."
-            item_type = "🎬 Video" if is_yt else "📦 File / Game"
 
+            # Extract clean filename from URL fragment (e.g. #Way_of_the_Hunter_...part01.rar)
+            parsed_u = urllib.parse.urlparse(u)
+            if parsed_u.fragment:
+                name = urllib.parse.unquote(parsed_u.fragment)
+            else:
+                p_name = os.path.basename(parsed_u.path)
+                if p_name and len(p_name) > 3:
+                    name = urllib.parse.unquote(p_name)
+
+            lower_name = name.lower()
             if is_yt:
                 name = "YouTube Video Stream"
                 size_str = "Adaptive"
+                item_type = "🎬 Video"
+            elif ".part" in lower_name and ".rar" in lower_name or lower_name.endswith(".rar"):
+                item_type = "🧩 RAR Part"
+            elif lower_name.endswith((".zip", ".7z", ".tar", ".gz")):
+                item_type = "📦 Archive"
+            elif lower_name.endswith((".iso", ".bin")):
+                item_type = "💿 Disc ISO"
+            elif lower_name.endswith((".exe", ".msi")):
+                item_type = "💻 Installer"
             else:
-                # Fast HEAD request to inspect direct files (zip, rar, games)
+                item_type = "📁 File / Host"
+
+            if not is_yt and size_str == "Checking...":
                 try:
                     req = urllib.request.Request(u, method="HEAD", headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=4) as resp:
+                    with urllib.request.urlopen(req, timeout=3) as resp:
                         cl = resp.headers.get('Content-Length')
                         cd = resp.headers.get('Content-Disposition')
                         if cd and 'filename=' in cd:
-                            name = re.findall(r'filename="?([^";]+)"?', cd)[0]
-                        else:
-                            name = u.split('/')[-1].split('?')[0] or "download"
-
-                        if cl:
+                            found = re.findall(r'filename="?([^";]+)"?', cd)
+                            if found:
+                                name = found[0]
+                        if cl and cl.isdigit():
                             size_str = ytdlp_service.format_bytes(int(cl))
+                        else:
+                            size_str = "Direct Stream"
                 except Exception:
-                    name = u.split('/')[-1].split('?')[0] or "Unknown File"
-                    size_str = "Direct Stream"
+                    size_str = "File Host"
 
             self.grabbed_links.append({
                 'url': u,
                 'name': name,
                 'type': item_type,
                 'size_str': size_str,
-                'status': 'Queued'
+                'status': 'Ready',
+                'task_id': None
             })
 
         self.after(0, self._render_grabbed_items)
@@ -951,81 +995,264 @@ class ModernYouTubeDownloader(ctk.CTk):
         for widget in self.grabbed_items_frame.winfo_children():
             widget.destroy()
 
-        self.grabber_status_lbl.configure(text=f"✓ Grabbed {len(self.grabbed_links)} items ready for download!", text_color="#34d399")
+        count = len(self.grabbed_links)
+        self.grabber_status_lbl.configure(
+            text=f"✓ Grabbed {count} items! You can download individual files or start the whole batch.",
+            text_color="#34d399"
+        )
 
         for idx, item in enumerate(self.grabbed_links):
-            row = ctk.CTkFrame(self.grabbed_items_frame, fg_color="#030712", corner_radius=8, height=44)
+            row = ctk.CTkFrame(self.grabbed_items_frame, fg_color="#030712", corner_radius=8, height=48)
             row.pack(fill="x", pady=2)
             row.pack_propagate(False)
 
+            # Badge
+            badge_color = "#38bdf8" if "Video" in item['type'] else ("#a78bfa" if "RAR" in item['type'] else "#34d399")
             ctk.CTkLabel(
                 row,
                 text=f"{item['type']}",
                 font=ctk.CTkFont(size=11, weight="bold"),
                 fg_color="#1e293b",
-                text_color="#38bdf8",
+                text_color=badge_color,
                 corner_radius=4,
-                width=90
-            ).pack(side="left", padx=(10, 8), pady=6)
+                width=100
+            ).pack(side="left", padx=(10, 8), pady=8)
 
+            # File name
+            name_display = item['name']
+            if len(name_display) > 52:
+                name_display = name_display[:50] + "..."
             ctk.CTkLabel(
                 row,
-                text=f"{item['name'][:50]}",
+                text=name_display,
                 font=ctk.CTkFont(size=12, weight="bold"),
-                text_color="#ffffff"
+                text_color="#ffffff",
+                anchor="w"
             ).pack(side="left", padx=(0, 10))
 
+            # File size
             ctk.CTkLabel(
                 row,
                 text=f"Size: {item['size_str']}",
                 font=ctk.CTkFont(size=11),
                 text_color="#94a3b8"
-            ).pack(side="left")
+            ).pack(side="left", padx=(0, 10))
 
+            # Status label
             item_status = ctk.CTkLabel(
                 row,
                 text=item['status'],
                 font=ctk.CTkFont(size=11),
-                text_color="#34d399" if item['status'] == 'Completed' else "#f59e0b"
+                text_color="#34d399" if item['status'] == 'Completed' else ("#f87171" if 'Fail' in item['status'] else "#f59e0b")
             )
-            item_status.pack(side="right", padx=16)
+            item_status.pack(side="right", padx=(8, 12))
+            item['status_lbl'] = item_status
+
+            # Individual Download Button
+            dl_btn = ctk.CTkButton(
+                row,
+                text="⬇ Download",
+                width=100,
+                height=28,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="#dc2626",
+                hover_color="#b91c1c",
+                command=lambda i=idx: self.start_individual_grabbed_download(i)
+            )
+            dl_btn.pack(side="right", padx=(4, 6))
+            item['dl_btn'] = dl_btn
+
+            # Browser Open Button (handles Cloudflare/Turnstile hosts seamlessly)
+            br_btn = ctk.CTkButton(
+                row,
+                text="🌐 Open",
+                width=65,
+                height=28,
+                font=ctk.CTkFont(size=11),
+                fg_color="#1f2937",
+                hover_color="#374151",
+                command=lambda u=item['url']: webbrowser.open(u)
+            )
+            br_btn.pack(side="right", padx=(4, 4))
+
+    def open_all_grabbed_in_browser(self):
+        if not self.grabbed_links:
+            return
+        for item in self.grabbed_links:
+            try:
+                webbrowser.open(item['url'])
+                time.sleep(0.15)
+            except Exception:
+                pass
+
+    def start_individual_grabbed_download(self, item_index):
+        if item_index >= len(self.grabbed_links):
+            return
+        item = self.grabbed_links[item_index]
+        u = item['url']
+        is_yt = "youtube.com" in u or "youtu.be" in u
+
+        # Show bottom dock
+        self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
+        self.dock_title_lbl.configure(text=f"Downloading: {item['name'][:45]}")
+        self.dock_status_lbl.configure(text="Connecting to download stream...")
+        self.dock_percent_lbl.configure(text="0%")
+        self.dock_progress.set(0.0)
+        self.dock_cancel_btn.configure(text="✕ Cancel", state="normal")
+
+        if 'dl_btn' in item and item['dl_btn']:
+            item['dl_btn'].configure(text="Downloading...", state="disabled", fg_color="#78350f")
+
+        if is_yt:
+            t_id = ytdlp_service.start_download_task(
+                url=u,
+                download_type="video",
+                format_id="best",
+                auth_config=self._get_auth_config(),
+                quality_label="Grabbed Video"
+            )
+        else:
+            t_id = ytdlp_service.start_direct_download_task(
+                url=u,
+                destination_dir=self.download_destination,
+                custom_filename=item['name'],
+                quality_label="Grabbed File"
+            )
+
+        self.active_task_id = t_id
+        self.tracking_active = True
+
+        def monitor_worker():
+            while self.tracking_active:
+                t = ytdlp_service.get_task_status(t_id)
+                if not t:
+                    break
+                st = t.get('status')
+                pct = t.get('progress', 0.0)
+                speed = t.get('speed', '--')
+                eta = t.get('eta', '--')
+
+                self.after(0, lambda s=st, p=pct, sp=speed: self._update_item_status(item, s, p, sp))
+                self.after(0, lambda p=pct/100.0, pi=int(pct), sp=speed, e=eta, s=st: self._update_dock_ui(p, pi, sp, e, s))
+
+                if st in ['completed', 'error', 'cancelled']:
+                    self.tracking_active = False
+                    if st == 'completed':
+                        item['status'] = 'Completed'
+                        self.after(0, lambda it=item: self._on_item_download_success(it))
+                    elif st == 'error':
+                        err = t.get('error', 'Error')
+                        item['status'] = 'Failed'
+                        self.after(0, lambda it=item, er=err: self._on_item_download_error(it, er))
+                    break
+                time.sleep(0.5)
+
+        threading.Thread(target=monitor_worker, daemon=True).start()
 
     def start_all_grabbed_downloads(self):
         if not self.grabbed_links:
             return
 
         self.start_all_btn.configure(state="disabled", text="Downloading Batch...")
-        self.select_tab("single")
+        # Note: Do NOT call self.select_tab("single") -- Stay on Link Grabber!
+        self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
 
         def batch_worker():
-            for item in self.grabbed_links:
+            total = len(self.grabbed_links)
+            for idx, item in enumerate(self.grabbed_links):
+                if item.get('status') == 'Completed':
+                    continue
+
                 u = item['url']
                 is_yt = "youtube.com" in u or "youtu.be" in u
-                
-                # Download task
-                t_id = ytdlp_service.start_download_task(
-                    url=u,
-                    download_type="video" if is_yt else "video_only",
-                    format_id="best",
-                    audio_ext="mp3",
-                    auth_config=self._get_auth_config(),
-                    quality_label="Batch Download"
-                )
+
+                self.after(0, lambda i=idx+1, tot=total, n=item['name']: (
+                    self.start_all_btn.configure(text=f"Batch: {i}/{tot}"),
+                    self.dock_title_lbl.configure(text=f"[{i}/{tot}] {n[:45]}")
+                ))
+
+                if is_yt:
+                    t_id = ytdlp_service.start_download_task(
+                        url=u,
+                        download_type="video",
+                        format_id="best",
+                        auth_config=self._get_auth_config(),
+                        quality_label=f"Batch {idx+1}/{total}"
+                    )
+                else:
+                    t_id = ytdlp_service.start_direct_download_task(
+                        url=u,
+                        destination_dir=self.download_destination,
+                        custom_filename=item['name'],
+                        quality_label=f"Batch {idx+1}/{total}"
+                    )
+
                 self.active_task_id = t_id
                 self.tracking_active = True
 
-                # Wait for task completion before starting next
                 while True:
                     t = ytdlp_service.get_task_status(t_id)
-                    if t and t.get('status') in ['completed', 'error', 'cancelled']:
-                        item['status'] = 'Completed' if t.get('status') == 'completed' else 'Failed'
+                    if not t:
                         break
-                    time.sleep(1)
+                    st = t.get('status')
+                    pct = t.get('progress', 0.0)
+                    speed = t.get('speed', '--')
+                    eta = t.get('eta', '--')
 
-            self.after(0, lambda: self.start_all_btn.configure(state="normal", text="▶ Start All Downloads"))
+                    self.after(0, lambda s=st, p=pct, sp=speed, it=item: self._update_item_status(it, s, p, sp))
+                    self.after(0, lambda p=pct/100.0, pi=int(pct), sp=speed, e=eta, s=st: self._update_dock_ui(p, pi, sp, e, s))
+
+                    if st in ['completed', 'error', 'cancelled']:
+                        if st == 'completed':
+                            item['status'] = 'Completed'
+                            self.after(0, lambda it=item: self._on_item_download_success(it))
+                        elif st == 'error':
+                            err = t.get('error', 'Error')
+                            item['status'] = 'Failed'
+                            self.after(0, lambda it=item, er=err: self._on_item_download_error(it, er))
+                        break
+                    time.sleep(0.5)
+
+            self.after(0, lambda: self.start_all_btn.configure(state="normal", text="⬇ Download All Items"))
             self.after(0, self.open_downloads_folder)
 
         threading.Thread(target=batch_worker, daemon=True).start()
+
+    def _update_item_status(self, item, status, pct, speed):
+        lbl = item.get('status_lbl')
+        if lbl:
+            if status == 'downloading':
+                lbl.configure(text=f"{int(pct)}% ({speed})", text_color="#38bdf8")
+            elif status == 'completed':
+                lbl.configure(text="✓ Done", text_color="#34d399")
+            elif status == 'error':
+                lbl.configure(text="Failed", text_color="#f87171")
+
+    def _on_item_download_success(self, item):
+        if 'dl_btn' in item and item['dl_btn']:
+            item['dl_btn'].configure(text="✓ Done", state="disabled", fg_color="#064e3b")
+        if 'status_lbl' in item and item['status_lbl']:
+            item['status_lbl'].configure(text="✓ Saved", text_color="#34d399")
+        self.dock_status_lbl.configure(text=f"✓ Downloaded: {item['name'][:40]}")
+
+    def _on_item_download_error(self, item, err):
+        is_cf = "403" in err or "Cloudflare" in err
+        if 'status_lbl' in item and item['status_lbl']:
+            if is_cf:
+                item['status_lbl'].configure(text="Cloudflare Protected", text_color="#f87171")
+            else:
+                item['status_lbl'].configure(text=f"Failed: {err[:20]}", text_color="#f87171")
+        if 'dl_btn' in item and item['dl_btn']:
+            if is_cf:
+                item['dl_btn'].configure(
+                    text="🌐 Browser DL",
+                    state="normal",
+                    fg_color="#b45309",
+                    command=lambda u=item['url']: webbrowser.open(u)
+                )
+            else:
+                item['dl_btn'].configure(text="Retry", state="normal", fg_color="#1f2937")
+        self.dock_status_lbl.configure(text=f"Error: {err}")
 
     # ==========================================
     # LOGIC: DOWNLOAD EXECUTION & PROGRESS

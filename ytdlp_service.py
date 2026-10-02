@@ -99,6 +99,7 @@ def get_base_ydl_opts(auth_config: Optional[Dict[str, Any]] = None) -> Dict[str,
         'remote_components': ['ejs:github'],
         'quiet': True,
         'no_warnings': True,
+        'ignoreconfig': True,  # 100% isolated: never loads external configs or ambient cookies
     }
     
     if os.path.exists(NODE_PATH):
@@ -479,3 +480,181 @@ def start_download_task(
 def get_task_status(task_id: str) -> Optional[Dict[str, Any]]:
     with tasks_lock:
         return tasks.get(task_id)
+
+def unpack_paste_urls(input_url: str) -> List[str]:
+    """
+    Detects if the URL is a PrivateBin (e.g. paste.fitgirl-repacks.site) 
+    or Pastebin paste, decrypts/fetches it, and returns the list of extracted URLs.
+    """
+    import urllib.parse
+    # Match PrivateBin format: https://domain/?id#passphrase
+    pb_match = re.search(r'(https?://[^/?#]+)/?\?([^#]+)#([A-Za-z0-9+/=_-]+)', input_url)
+    if pb_match:
+        try:
+            from pbincli.api import PrivateBin
+            from pbincli.format import Paste
+
+            base_url = pb_match.group(1) + '/'
+            paste_id = pb_match.group(2)
+            passphrase = pb_match.group(3)
+
+            api = PrivateBin({'server': base_url, 'proxy': None, 'verbose': False, 'debug': False})
+            res = api.get(paste_id)
+            p = Paste(debug=False)
+            p.setVersion(res.get('v', 1))
+            p.setHash(passphrase)
+            p.loadJSON(res)
+            p.decrypt()
+            raw = p.getText()
+            if isinstance(raw, bytes):
+                raw = raw.decode('utf-8', errors='replace')
+            extracted = re.findall(r'https?://[^\s<>"\'\)]+', raw)
+            if extracted:
+                return extracted
+        except Exception:
+            pass
+
+    return [input_url]
+
+def _direct_file_worker(task_id: str, url: str, destination_dir: str, custom_filename: Optional[str] = None):
+    import urllib.request
+    import urllib.parse
+    
+    with tasks_lock:
+        tasks[task_id]['status'] = 'downloading'
+        tasks[task_id]['message'] = 'Connecting to server...'
+
+    target_path = ""
+    try:
+        # Determine filename
+        filename = custom_filename
+        if not filename:
+            parsed = urllib.parse.urlparse(url)
+            if parsed.fragment:
+                filename = parsed.fragment
+            else:
+                path = parsed.path
+                filename = os.path.basename(path) or f"download_{task_id}.bin"
+
+        # Sanitize filename
+        filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+        os.makedirs(destination_dir, exist_ok=True)
+        target_path = os.path.join(destination_dir, filename)
+
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': '*/*'
+        })
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            total_size = resp.headers.get('Content-Length')
+            total_bytes = int(total_size) if total_size and total_size.isdigit() else 0
+            
+            with tasks_lock:
+                tasks[task_id]['total_bytes'] = total_bytes
+                tasks[task_id]['filename'] = filename
+                tasks[task_id]['file_path'] = target_path
+
+            downloaded = 0
+            start_time = time.time()
+            last_time = start_time
+            last_bytes = 0
+
+            with open(target_path, 'wb') as f:
+                while True:
+                    with tasks_lock:
+                        if tasks[task_id].get('cancelled'):
+                            raise DownloadCancelledException("Cancelled by user.")
+
+                    chunk = resp.read(65536) # 64 KB chunk
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    now = time.time()
+                    if now - last_time >= 0.5:
+                        chunk_time = now - last_time
+                        chunk_bytes = downloaded - last_bytes
+                        speed = chunk_bytes / chunk_time if chunk_time > 0 else 0
+                        speed_str = format_bytes(speed) + "/s"
+
+                        if total_bytes > 0:
+                            percent = round((downloaded / total_bytes) * 100, 1)
+                            rem_bytes = max(0, total_bytes - downloaded)
+                            eta_sec = int(rem_bytes / speed) if speed > 0 else 0
+                            eta_str = f"{eta_sec}s"
+                        else:
+                            percent = 50.0
+                            eta_str = "--"
+
+                        with tasks_lock:
+                            tasks[task_id]['progress'] = percent
+                            tasks[task_id]['downloaded_bytes'] = downloaded
+                            tasks[task_id]['speed'] = speed_str
+                            tasks[task_id]['eta'] = eta_str
+                            tasks[task_id]['message'] = f"Downloading: {percent}% at {speed_str} (ETA: {eta_str})"
+
+                        last_time = now
+                        last_bytes = downloaded
+
+        with tasks_lock:
+            tasks[task_id]['status'] = 'completed'
+            tasks[task_id]['progress'] = 100.0
+            tasks[task_id]['speed'] = '0 KB/s'
+            tasks[task_id]['eta'] = '0s'
+            tasks[task_id]['message'] = '✓ Download completed!'
+
+    except DownloadCancelledException:
+        with tasks_lock:
+            tasks[task_id]['status'] = 'cancelled'
+            tasks[task_id]['message'] = 'Download cancelled.'
+        try:
+            if target_path and os.path.exists(target_path):
+                os.remove(target_path)
+        except Exception:
+            pass
+    except Exception as e:
+        err_msg = str(e)
+        if "403" in err_msg:
+            err_msg = "HTTP 403 (Host protection / Cloudflare challenge triggered)."
+        with tasks_lock:
+            tasks[task_id]['status'] = 'error'
+            tasks[task_id]['error'] = err_msg
+            tasks[task_id]['message'] = f"Failed: {err_msg}"
+
+def start_direct_download_task(
+    url: str,
+    destination_dir: str,
+    custom_filename: Optional[str] = None,
+    quality_label: str = "Direct Download"
+) -> str:
+    """Spawns an asynchronous direct file download task and returns its task_id."""
+    task_id = str(uuid.uuid4())[:8]
+    with tasks_lock:
+        tasks[task_id] = {
+            'task_id': task_id,
+            'url': url,
+            'type': 'direct_file',
+            'custom_filename': custom_filename,
+            'quality_label': quality_label,
+            'status': 'queued',
+            'progress': 0.0,
+            'speed': '0 KB/s',
+            'eta': '--',
+            'message': 'Queued...',
+            'error': None,
+            'cancelled': False,
+            'file_path': None,
+            'filename': custom_filename,
+            'filesize': 0,
+            'filesize_str': '',
+            'created_at': time.time()
+        }
+    t = threading.Thread(
+        target=_direct_file_worker,
+        args=(task_id, url, destination_dir, custom_filename),
+        daemon=True
+    )
+    t.start()
+    return task_id
