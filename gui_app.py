@@ -40,6 +40,7 @@ class ModernYouTubeDownloader(ctk.CTk):
         self.format_states = {}
         self.tracking_active = False
         self.custom_cookie_file = None
+        self.active_download_url = None
         self.download_destination = ytdlp_service.DOWNLOADS_DIR
 
         # Link Grabber State
@@ -183,8 +184,8 @@ class ModernYouTubeDownloader(ctk.CTk):
 
         self.dock_cancel_btn = ctk.CTkButton(
             dock_bottom,
-            text="✕ Cancel Download",
-            width=135,
+            text="✕ Cancel",
+            width=100,
             height=28,
             font=ctk.CTkFont(size=11, weight="bold"),
             fg_color="#991b1b",
@@ -192,6 +193,22 @@ class ModernYouTubeDownloader(ctk.CTk):
             command=self.cancel_active_download
         )
         self.dock_cancel_btn.pack(side="right")
+
+        self.dock_browser_btn = ctk.CTkButton(
+            dock_bottom,
+            text="🌐 Open Link in Browser",
+            width=160,
+            height=28,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#b45309",
+            hover_color="#d97706",
+            command=self.open_active_in_browser
+        )
+        # Hidden by default; packed when Cloudflare challenge is triggered
+
+    def open_active_in_browser(self):
+        if self.active_download_url:
+            webbrowser.open(self.active_download_url)
 
     def select_tab(self, tab_name):
         for t_id, frame in self.frames.items():
@@ -1093,6 +1110,8 @@ class ModernYouTubeDownloader(ctk.CTk):
         is_yt = "youtube.com" in u or "youtu.be" in u
 
         # Show bottom dock
+        self.active_download_url = u
+        self.dock_browser_btn.pack_forget()
         self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
         self.dock_title_lbl.configure(text=f"Downloading: {item['name'][:45]}")
         self.dock_status_lbl.configure(text="Connecting to download stream...")
@@ -1237,6 +1256,7 @@ class ModernYouTubeDownloader(ctk.CTk):
 
     def _on_item_download_error(self, item, err):
         is_cf = "403" in err or "Cloudflare" in err
+        self.active_download_url = item.get('url')
         if 'status_lbl' in item and item['status_lbl']:
             if is_cf:
                 item['status_lbl'].configure(text="Cloudflare Protected", text_color="#f87171")
@@ -1252,7 +1272,13 @@ class ModernYouTubeDownloader(ctk.CTk):
                 )
             else:
                 item['dl_btn'].configure(text="Retry", state="normal", fg_color="#1f2937")
-        self.dock_status_lbl.configure(text=f"Error: {err}")
+
+        if is_cf:
+            self.dock_status_lbl.configure(text="Cloudflare Turnstile verification required. Click 'Open in Browser' to download.")
+            self.dock_browser_btn.pack(side="right", padx=(0, 8))
+        else:
+            self.dock_browser_btn.pack_forget()
+            self.dock_status_lbl.configure(text=f"Error: {err}")
 
     # ==========================================
     # LOGIC: DOWNLOAD EXECUTION & PROGRESS
