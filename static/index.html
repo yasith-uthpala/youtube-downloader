@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Video & Audio Downloader - All Qualities & 60 FPS</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="style.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#fef2f2',
+              500: '#ef4444',
+              600: '#dc2626',
+              700: '#b91c1c',
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-[#0b0f19] text-gray-100 min-h-screen font-sans antialiased selection:bg-red-500 selection:text-white pb-28">
+
+  <!-- Header -->
+  <header class="border-b border-gray-800 bg-[#0f172a]/90 backdrop-blur-md sticky top-0 z-40">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-red-600 to-red-500 flex items-center justify-center shadow-lg shadow-red-500/20">
+          <i data-lucide="play" class="w-5 h-5 text-white fill-white ml-0.5"></i>
+        </div>
+        <div>
+          <h1 class="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
+            YTDL Pro
+            <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20">All Qualities & 60 FPS</span>
+          </h1>
+          <p class="text-xs text-gray-400">Simple & Fast YouTube Downloader with FFmpeg Video/Audio Merging</p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 sm:gap-3">
+        <!-- Live Download Counter Badge in Header -->
+        <button id="headerDownloadsBtn" class="hidden text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-600/20 text-red-400 border border-red-500/30 flex items-center gap-1.5 hover:bg-red-600/30 transition animate-pulse">
+          <i data-lucide="arrow-down-circle" class="w-4 h-4"></i>
+          <span id="headerDownloadsText">1 Downloading</span>
+        </button>
+
+        <button id="openFolderBtn" class="text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition">
+          <i data-lucide="folder" class="w-4 h-4 text-amber-400"></i>
+          <span class="hidden sm:inline">Open Downloads Folder</span>
+          <span class="sm:hidden">Folder</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="max-w-4xl mx-auto px-4 py-6 space-y-6">
+
+    <!-- Privacy & Safe Mode Notice Banner -->
+    <div class="bg-gray-900/60 border border-emerald-500/30 rounded-xl px-4 py-2.5 flex items-center justify-between text-xs">
+      <div class="flex items-center gap-2 text-emerald-400">
+        <i data-lucide="shield-check" class="w-4 h-4 shrink-0"></i>
+        <span class="font-medium">Privacy Protected: Safe Anonymous Mode is active. No browser files or personal data are accessed.</span>
+      </div>
+      <button id="toggleAuthBtn" class="text-[11px] text-gray-400 hover:text-white underline decoration-dotted ml-2 shrink-0">
+        Login Settings
+      </button>
+    </div>
+
+    <!-- Input Section -->
+    <div class="bg-gray-900/90 border border-gray-800 rounded-2xl p-5 sm:p-6 shadow-2xl backdrop-blur">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-base sm:text-lg font-bold text-white">Enter YouTube Video Link</h2>
+          <p class="text-xs text-gray-400">Paste any video link to see every available quality and 60 FPS option</p>
+        </div>
+      </div>
+
+      <!-- Auth Settings Accordion (Collapsible) -->
+      <div id="authSettingsPanel" class="hidden mb-5 p-4 rounded-xl bg-gray-950 border border-gray-800 space-y-3">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold text-gray-200 flex items-center gap-1.5">
+            <i data-lucide="lock" class="w-3.5 h-3.5 text-yellow-400"></i>
+            Authentication & Anti-Bot Settings
+          </span>
+          <span class="text-[11px] text-gray-500">Only required if YouTube blocks a specific video with "Sign in to confirm"</span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+          <!-- Safe Mode (Default) -->
+          <label class="flex flex-col p-3 rounded-lg border border-emerald-500/40 bg-emerald-950/20 cursor-pointer transition">
+            <div class="flex items-center justify-between mb-1">
+              <span class="font-medium text-emerald-300 flex items-center gap-1.5">
+                <input type="radio" name="authMode" value="none" checked class="text-emerald-500 focus:ring-0">
+                Safe Mode (Anonymous)
+              </span>
+              <span class="text-[10px] text-emerald-400 font-bold bg-emerald-950 px-1.5 py-0.5 rounded border border-emerald-800">Default</span>
+            </div>
+            <p class="text-[11px] text-gray-400 mt-1">Zero browser access. Safest method for standard videos.</p>
+          </label>
+
+          <!-- Option 2: Browser Session (Optional) -->
+          <label class="flex flex-col p-3 rounded-lg border border-gray-800 bg-gray-900 cursor-pointer hover:border-gray-700 transition">
+            <div class="flex items-center justify-between mb-1">
+              <span class="font-medium text-white flex items-center gap-1.5">
+                <input type="radio" name="authMode" value="browser" class="text-red-500 focus:ring-0">
+                Browser Cookies
+              </span>
+              <span class="text-[10px] text-yellow-400 font-semibold bg-yellow-950/60 px-1.5 py-0.5 rounded">Optional</span>
+            </div>
+            <p class="text-[11px] text-gray-400 mb-1.5">Runs 100% locally on your PC to bypass age limits:</p>
+            <select id="browserSelect" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-gray-200 text-xs">
+              <option value="opera_gx" selected>Opera GX</option>
+              <option value="edge">Microsoft Edge</option>
+              <option value="chrome">Google Chrome</option>
+              <option value="firefox">Mozilla Firefox</option>
+            </select>
+          </label>
+
+          <!-- Option 3: Upload cookies.txt -->
+          <label class="flex flex-col p-3 rounded-lg border border-gray-800 bg-gray-900 cursor-pointer hover:border-gray-700 transition">
+            <div class="flex items-center justify-between mb-1">
+              <span class="font-medium text-white flex items-center gap-1.5">
+                <input type="radio" name="authMode" value="file" class="text-red-500 focus:ring-0">
+                Custom cookies.txt
+              </span>
+            </div>
+            <input type="file" id="cookieFileInput" accept=".txt" class="mt-1 text-[11px] text-gray-400 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[11px] file:bg-gray-800 file:text-gray-300">
+            <div id="cookieUploadStatus" class="text-[10px] text-gray-400 mt-1">Exported text file only</div>
+          </label>
+        </div>
+      </div>
+
+      <!-- URL Input & Fetch Button -->
+      <div class="flex flex-col sm:flex-row gap-2">
+        <div class="relative flex-1">
+          <div class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+            <i data-lucide="link" class="w-4 h-4 text-gray-500"></i>
+          </div>
+          <input 
+            type="text" 
+            id="urlInput"
+            placeholder="Paste YouTube link (e.g. https://www.youtube.com/watch?v=... or shorts)"
+            class="w-full pl-10 pr-20 py-3 bg-gray-950 border border-gray-800 focus:border-red-500 focus:ring-1 focus:ring-red-500 rounded-xl text-white placeholder-gray-500 text-sm transition outline-none"
+          >
+          <button id="pasteBtn" type="button" class="absolute right-2 top-2 bottom-2 px-2.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-medium flex items-center gap-1 transition">
+            <i data-lucide="clipboard" class="w-3.5 h-3.5"></i>
+            <span>Paste</span>
+          </button>
+        </div>
+        <button 
+          id="fetchBtn" 
+          class="px-6 py-3 bg-red-600 hover:bg-red-500 text-white font-medium rounded-xl text-sm flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 transition duration-150 disabled:opacity-50"
+        >
+          <i data-lucide="search" class="w-4 h-4"></i>
+          <span>Fetch Formats</span>
+        </button>
+      </div>
+
+      <!-- Quick sample suggestions -->
+      <div class="mt-3 flex items-center gap-2 text-xs text-gray-500">
+        <span>Try sample:</span>
+        <button class="sample-link text-gray-400 hover:text-red-400 underline decoration-dotted transition" data-url="https://www.youtube.com/watch?v=dQw4w9WgXcQ">Rick Astley 4K</button>
+        <span>•</span>
+        <button class="sample-link text-gray-400 hover:text-red-400 underline decoration-dotted transition" data-url="https://www.youtube.com/watch?v=jNQXAC9IVRw">Me at the zoo</button>
+      </div>
+    </div>
+
+    <!-- Loading State -->
+    <div id="loadingState" class="hidden bg-gray-900 border border-gray-800 rounded-2xl p-10 text-center space-y-4">
+      <div class="inline-block animate-spin w-10 h-10 border-4 border-red-500 border-t-transparent rounded-full"></div>
+      <h3 class="text-base font-semibold text-white">Extracting all available resolutions & 60 FPS streams...</h3>
+      <p class="text-xs text-gray-400 max-w-sm mx-auto">Evaluating video streams, framerates, codecs, and audio tracks</p>
+    </div>
+
+    <!-- Error Alert -->
+    <div id="errorAlert" class="hidden bg-red-950/80 border border-red-800/80 rounded-2xl p-4 flex items-start gap-3">
+      <i data-lucide="alert-triangle" class="w-5 h-5 text-red-400 shrink-0 mt-0.5"></i>
+      <div class="flex-1 text-xs">
+        <h4 class="font-bold text-red-200">Unable to Fetch Video</h4>
+        <p id="errorMessage" class="text-red-300 mt-0.5"></p>
+      </div>
+      <button id="dismissErrorBtn" class="text-red-400 hover:text-red-200">
+        <i data-lucide="x" class="w-4 h-4"></i>
+      </button>
+    </div>
+
+    <!-- Video Details & Formats View -->
+    <div id="videoDetailsCard" class="hidden space-y-6">
+
+      <!-- Video Overview Card -->
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl p-5 flex flex-col md:flex-row gap-5 shadow-xl">
+        <!-- Thumbnail -->
+        <div class="relative rounded-xl overflow-hidden md:w-64 aspect-video bg-gray-950 shrink-0 border border-gray-800">
+          <img id="videoThumbnail" src="" alt="Thumbnail" class="w-full h-full object-cover">
+          <span id="videoDuration" class="absolute bottom-2 right-2 bg-black/80 backdrop-blur-sm text-white text-[11px] font-mono font-medium px-2 py-0.5 rounded-md border border-white/10">00:00</span>
+        </div>
+
+        <!-- Info & Quick Action -->
+        <div class="flex-1 flex flex-col justify-between">
+          <div class="space-y-1.5">
+            <h3 id="videoTitle" class="text-base font-bold text-white line-clamp-2 leading-snug">Video Title</h3>
+            <div class="flex flex-wrap items-center gap-3 text-xs text-gray-400">
+              <span id="videoChannel" class="flex items-center gap-1 font-medium text-gray-300">
+                <i data-lucide="user" class="w-3.5 h-3.5 text-gray-500"></i> Channel Name
+              </span>
+              <span>•</span>
+              <span id="videoViews" class="flex items-center gap-1">
+                <i data-lucide="eye" class="w-3.5 h-3.5 text-gray-500"></i> 0 views
+              </span>
+              <span>•</span>
+              <span id="videoQualityCount" class="text-emerald-400 font-semibold bg-emerald-950/60 px-2 py-0.5 rounded-md border border-emerald-800/40">
+                All Qualities Ready
+              </span>
+            </div>
+          </div>
+
+          <!-- Quick Download Button -->
+          <div class="mt-4 pt-3 border-t border-gray-800/80 flex flex-wrap items-center gap-3">
+            <button 
+              id="quickDownloadBtn"
+              class="px-4 py-2.5 bg-gradient-to-r from-red-600 to-red-500 hover:from-red-500 hover:to-red-400 text-white font-medium rounded-xl text-xs flex items-center gap-2 shadow-lg shadow-red-600/20 transition"
+            >
+              <i data-lucide="zap" class="w-4 h-4 text-amber-300 fill-amber-300"></i>
+              <span id="quickDownloadText">Download Highest Quality (Best MP4)</span>
+            </button>
+            <span class="text-[11px] text-gray-400">Merges highest resolution with best audio into MP4</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Format Selection Tabs & List -->
+      <div class="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-4 shadow-xl">
+        <!-- Tabs Header -->
+        <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+          <div class="flex items-center gap-2">
+            <button id="tabVideo" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-red-600/20 text-red-400 border border-red-500/30 flex items-center gap-1.5 transition">
+              <i data-lucide="video" class="w-3.5 h-3.5"></i>
+              <span>Video + Audio (All Qualities & FPS)</span>
+            </button>
+            <button id="tabAudio" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-gray-800/60 text-gray-400 hover:text-gray-200 border border-gray-700/50 flex items-center gap-1.5 transition">
+              <i data-lucide="music" class="w-3.5 h-3.5"></i>
+              <span>Audio Only (MP3 / M4A)</span>
+            </button>
+          </div>
+          <span class="text-[11px] text-emerald-400 font-medium hidden sm:inline flex items-center gap-1">
+            <i data-lucide="check-circle" class="w-3.5 h-3.5"></i> Audio automatically merged with FFmpeg
+          </span>
+        </div>
+
+        <!-- Video Formats Container -->
+        <div id="videoFormatsTab" class="space-y-2">
+          <div class="grid grid-cols-1 gap-2.5" id="videoFormatsList">
+            <!-- Dynamic Video Quality Rows will be injected here -->
+          </div>
+        </div>
+
+        <!-- Audio Formats Container -->
+        <div id="audioFormatsTab" class="hidden space-y-2">
+          <div class="p-3 bg-gray-950/60 rounded-xl border border-gray-800 text-xs text-gray-400 mb-3 flex items-center gap-2">
+            <i data-lucide="info" class="w-4 h-4 text-blue-400 shrink-0"></i>
+            <span>Extract pristine audio tracks or convert to 320kbps MP3 automatically using FFmpeg.</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" id="audioFormatsList">
+            <!-- Dynamic Audio Quality Cards will be injected here -->
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- In-Page Downloads Section -->
+    <div id="activeDownloadsContainer" class="hidden space-y-3 pt-4">
+      <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+        <h3 class="text-sm font-bold text-white flex items-center gap-2">
+          <i data-lucide="download-cloud" class="w-4 h-4 text-red-500"></i>
+          Downloads & History
+        </h3>
+        <span class="text-xs text-gray-400" id="downloadCountLabel">Active Tasks</span>
+      </div>
+      <div id="downloadsList" class="space-y-3">
+        <!-- Progress cards injected here -->
+      </div>
+    </div>
+
+  </main>
+
+  <!-- FLOATING BOTTOM DOWNLOAD BAR (Always Visible & Highly Noticeable) -->
+  <div id="floatingDownloadBar" class="hidden fixed bottom-4 left-4 right-4 max-w-3xl mx-auto z-50">
+    <div class="bg-gray-900/95 border-2 border-red-500/50 rounded-2xl p-4 shadow-2xl backdrop-blur-lg flex flex-col gap-2.5 animate-slide-up">
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5 min-w-0 flex-1">
+          <div class="w-7 h-7 rounded-lg bg-red-600/20 text-red-400 flex items-center justify-center shrink-0 border border-red-500/30">
+            <i data-lucide="arrow-down" class="w-4 h-4 animate-bounce"></i>
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2">
+              <h4 id="floatingTitle" class="text-xs font-bold text-white truncate">Video Title</h4>
+              <span id="floatingBadge" class="text-[10px] font-bold px-1.5 py-0.2 rounded bg-red-500/20 text-red-400 border border-red-500/30">1080p 60fps</span>
+            </div>
+            <div class="flex items-center gap-2 text-[11px] text-gray-300">
+              <span id="floatingStatus" class="text-amber-400 font-semibold">Downloading...</span>
+              <span>•</span>
+              <span id="floatingSpeed" class="text-gray-400">0 KB/s</span>
+              <span>•</span>
+              <span id="floatingEta" class="text-gray-400">ETA: --</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Floating Action Buttons -->
+        <div class="flex items-center gap-2 shrink-0">
+          <span id="floatingPercent" class="text-xs font-bold text-white px-2 py-0.5 rounded bg-gray-800 border border-gray-700">0%</span>
+          <!-- Cancel Button -->
+          <button id="floatingCancelBtn" class="px-2.5 py-1.5 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/40 rounded-lg text-xs font-semibold flex items-center gap-1 transition">
+            <i data-lucide="x" class="w-3.5 h-3.5"></i>
+            <span>Cancel</span>
+          </button>
+          <!-- Save button when complete -->
+          <a id="floatingSaveBtn" href="#" download class="hidden px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow transition">
+            <i data-lucide="download" class="w-3.5 h-3.5"></i>
+            <span>Save File</span>
+          </a>
+          <!-- Dismiss button -->
+          <button id="floatingDismissBtn" class="text-gray-400 hover:text-white p-1">
+            <i data-lucide="x" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Animated Progress Bar -->
+      <div class="w-full bg-gray-950 rounded-full h-2.5 overflow-hidden border border-gray-800">
+        <div id="floatingProgressBar" class="bg-gradient-to-r from-red-600 via-amber-500 to-emerald-500 h-2.5 rounded-full transition-all duration-300 w-0"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="fixed top-20 right-4 z-50 space-y-2 pointer-events-none"></div>
+
+  <!-- Footer -->
+  <footer class="border-t border-gray-800/60 mt-12 py-6 text-center text-xs text-gray-500">
+    <p>Powered by yt-dlp & FFmpeg • Privacy-Preserving Architecture</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
