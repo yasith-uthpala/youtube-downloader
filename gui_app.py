@@ -51,6 +51,10 @@ class ModernYouTubeDownloader(ctk.CTk):
         self.playlist_vars = {}
         self.playlist_batch_active = False
 
+        # Universal Downloader State
+        self.universal_video_data = None
+        self.universal_adv_visible = False
+
         self._build_ui()
         self.select_tab("single")
 
@@ -93,6 +97,7 @@ class ModernYouTubeDownloader(ctk.CTk):
         nav_items = [
             ("single", "🎬  Single Downloader"),
             ("playlist", "📑  Playlist Downloader"),
+            ("universal", "🌐  Universal Downloader"),
             ("grabber", "🧲  Link Grabber (Bulk)"),
             ("settings", "⚙️  Settings & Privacy"),
         ]
@@ -142,6 +147,7 @@ class ModernYouTubeDownloader(ctk.CTk):
         self.frames = {
             "single": self._build_single_downloader_frame(),
             "playlist": self._build_playlist_downloader_frame(),
+            "universal": self._build_universal_downloader_frame(),
             "grabber": self._build_link_grabber_frame(),
             "settings": self._build_settings_frame()
         }
@@ -582,8 +588,454 @@ class ModernYouTubeDownloader(ctk.CTk):
         return container
 
     # ==========================================
-    # TAB 3: LINK GRABBER & BULK DOWNLOADER
+    # TAB 3: UNIVERSAL VIDEO DOWNLOADER
     # ==========================================
+    def _build_universal_downloader_frame(self):
+        container = ctk.CTkScrollableFrame(self.content_area, fg_color="transparent")
+
+        # ---- Hero Header ----
+        hero = ctk.CTkFrame(container, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1f2937")
+        hero.pack(fill="x", padx=16, pady=16, ipady=4)
+
+        ctk.CTkLabel(
+            hero,
+            text="🌐  Universal Video Downloader",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="#ffffff"
+        ).pack(anchor="w", padx=16, pady=(10, 2))
+
+        ctk.CTkLabel(
+            hero,
+            text="Download videos from 1,750+ sites: Twitter/X, TikTok, Instagram, Reddit, Vimeo, Twitch, Facebook, Dailymotion and more.",
+            font=ctk.CTkFont(size=11),
+            text_color="#94a3b8"
+        ).pack(anchor="w", padx=16, pady=(0, 10))
+
+        # Supported sites pill strip
+        sites_row = ctk.CTkFrame(hero, fg_color="transparent")
+        sites_row.pack(anchor="w", padx=16, pady=(0, 10))
+        for site in ["Twitter/X", "TikTok", "Instagram", "Reddit", "Vimeo", "Twitch", "Facebook", "Dailymotion", "SoundCloud", "Bilibili"]:
+            ctk.CTkLabel(
+                sites_row,
+                text=site,
+                font=ctk.CTkFont(size=10, weight="bold"),
+                text_color="#94a3b8",
+                fg_color="#1e293b",
+                corner_radius=6,
+                padx=8, pady=3
+            ).pack(side="left", padx=3)
+
+        # ---- URL Input Row ----
+        in_row = ctk.CTkFrame(hero, fg_color="transparent")
+        in_row.pack(fill="x", padx=16, pady=(4, 6))
+
+        self.universal_url_entry = ctk.CTkEntry(
+            in_row,
+            placeholder_text="Paste any video URL (Twitter, TikTok, Instagram, Vimeo, Twitch...)",
+            height=42,
+            font=ctk.CTkFont(size=12),
+            fg_color="#030712",
+            border_color="#374151"
+        )
+        self.universal_url_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.universal_url_entry.bind("<Return>", lambda e: self.universal_fetch_info())
+
+        paste_btn = ctk.CTkButton(
+            in_row, text="📋 Paste", width=75, height=42,
+            font=ctk.CTkFont(size=12), fg_color="#1f2937", hover_color="#374151",
+            command=self._universal_paste_url
+        )
+        paste_btn.pack(side="left", padx=(0, 8))
+
+        self.universal_fetch_btn = ctk.CTkButton(
+            in_row, text="🔍 Analyze", width=130, height=42,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#7c3aed", hover_color="#6d28d9",
+            command=self.universal_fetch_info
+        )
+        self.universal_fetch_btn.pack(side="left")
+
+        self.universal_status_lbl = ctk.CTkLabel(
+            hero, text="Enter any video URL above and click Analyze.",
+            font=ctk.CTkFont(size=11), text_color="#94a3b8"
+        )
+        self.universal_status_lbl.pack(anchor="w", padx=16, pady=(2, 10))
+
+        # ---- Result Card (hidden until fetch) ----
+        self.universal_result_card = ctk.CTkFrame(
+            container, fg_color="#111827", corner_radius=12, border_width=1, border_color="#1f2937"
+        )
+
+        # Metadata row
+        meta_row = ctk.CTkFrame(self.universal_result_card, fg_color="transparent")
+        meta_row.pack(fill="x", padx=16, pady=(14, 6))
+
+        # Site badge + title
+        left_meta = ctk.CTkFrame(meta_row, fg_color="transparent")
+        left_meta.pack(side="left", fill="x", expand=True)
+
+        self.universal_site_badge = ctk.CTkLabel(
+            left_meta, text="Site", font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#a78bfa", fg_color="#1e1b4b", corner_radius=6, padx=8, pady=3
+        )
+        self.universal_site_badge.pack(anchor="w")
+
+        self.universal_title_lbl = ctk.CTkLabel(
+            left_meta, text="Video Title",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#f1f5f9", anchor="w", wraplength=600
+        )
+        self.universal_title_lbl.pack(anchor="w", pady=(4, 0))
+
+        self.universal_meta_lbl = ctk.CTkLabel(
+            left_meta, text="Uploader • Duration • Views",
+            font=ctk.CTkFont(size=11), text_color="#94a3b8", anchor="w"
+        )
+        self.universal_meta_lbl.pack(anchor="w", pady=(2, 0))
+
+        # Open in browser button
+        self.universal_browser_btn = ctk.CTkButton(
+            meta_row, text="🌐 Open", width=80, height=32,
+            font=ctk.CTkFont(size=11), fg_color="#1e293b", hover_color="#334155",
+            command=lambda: webbrowser.open(self.universal_video_data.get('webpage_url', '')) if self.universal_video_data else None
+        )
+        self.universal_browser_btn.pack(side="right", padx=(8, 0))
+
+        # Divider
+        ctk.CTkFrame(self.universal_result_card, fg_color="#1f2937", height=1).pack(fill="x", padx=16, pady=8)
+
+        # ---- Simple Download Section ----
+        simple_lbl = ctk.CTkLabel(
+            self.universal_result_card, text="Quick Download",
+            font=ctk.CTkFont(size=12, weight="bold"), text_color="#e2e8f0"
+        )
+        simple_lbl.pack(anchor="w", padx=16, pady=(4, 8))
+
+        simple_row = ctk.CTkFrame(self.universal_result_card, fg_color="#030712", corner_radius=8)
+        simple_row.pack(fill="x", padx=16, pady=(0, 10))
+
+        # Format picker
+        ctk.CTkLabel(simple_row, text="Format:", font=ctk.CTkFont(size=11), text_color="#cbd5e1").pack(side="left", padx=(12, 6), pady=10)
+        self.universal_fmt_menu = ctk.CTkOptionMenu(
+            simple_row,
+            values=["🎬 Best Video (MP4)", "🎵 Best Audio (MP3 320k)", "🎵 Best Audio (M4A)", "📦 Best (Original Format)"],
+            width=200, height=32, font=ctk.CTkFont(size=11),
+            fg_color="#1f2937", button_color="#374151"
+        )
+        self.universal_fmt_menu.pack(side="left", padx=(0, 10))
+
+        self.universal_dl_btn = ctk.CTkButton(
+            simple_row, text="⬇ Download", width=130, height=34,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#7c3aed", hover_color="#6d28d9",
+            command=self.universal_start_download
+        )
+        self.universal_dl_btn.pack(side="left", padx=(0, 10))
+
+        # ---- Advanced Options Toggle ----
+        adv_toggle_row = ctk.CTkFrame(self.universal_result_card, fg_color="transparent")
+        adv_toggle_row.pack(fill="x", padx=16, pady=(0, 4))
+
+        self.universal_adv_btn = ctk.CTkButton(
+            adv_toggle_row,
+            text="▶ Advanced Options (resolutions & audio streams)",
+            width=320, height=28,
+            font=ctk.CTkFont(size=11),
+            fg_color="transparent", hover_color="#1e293b",
+            text_color="#64748b", anchor="w",
+            command=self._toggle_universal_advanced
+        )
+        self.universal_adv_btn.pack(anchor="w")
+
+        # ---- Advanced Panel (hidden by default) ----
+        self.universal_adv_frame = ctk.CTkFrame(self.universal_result_card, fg_color="#0b1120", corner_radius=8, border_width=1, border_color="#1f2937")
+        # Not packed initially — shown when toggled
+
+        adv_tabs = ctk.CTkFrame(self.universal_adv_frame, fg_color="transparent")
+        adv_tabs.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(adv_tabs, text="🎬 Video Resolutions", font=ctk.CTkFont(size=11, weight="bold"), text_color="#a78bfa").pack(anchor="w")
+
+        self.universal_video_formats_frame = ctk.CTkFrame(self.universal_adv_frame, fg_color="transparent")
+        self.universal_video_formats_frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        ctk.CTkFrame(self.universal_adv_frame, fg_color="#1f2937", height=1).pack(fill="x", padx=12, pady=4)
+
+        ctk.CTkLabel(adv_tabs, text="🎵 Audio Streams", font=ctk.CTkFont(size=11, weight="bold"), text_color="#34d399").pack(anchor="w", pady=(8, 0))
+
+        self.universal_audio_formats_frame = ctk.CTkFrame(self.universal_adv_frame, fg_color="transparent")
+        self.universal_audio_formats_frame.pack(fill="x", padx=12, pady=(0, 12))
+
+        return container
+
+    # ==========================================
+    # LOGIC: UNIVERSAL DOWNLOADER
+    # ==========================================
+    def _universal_paste_url(self):
+        try:
+            clip = self.clipboard_get().strip()
+            if clip:
+                self.universal_url_entry.delete(0, "end")
+                self.universal_url_entry.insert(0, clip)
+                self.universal_fetch_info()
+        except Exception:
+            pass
+
+    def universal_fetch_info(self):
+        url = self.universal_url_entry.get().strip()
+        if not url:
+            self.universal_status_lbl.configure(text="Please paste a video URL first.", text_color="#f87171")
+            return
+
+        # Redirect YouTube to Single Downloader tab
+        if "youtube.com/watch" in url or "youtu.be/" in url:
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, url)
+            self.select_tab("single")
+            self.fetch_video_info()
+            return
+
+        # Redirect YouTube playlists to Playlist tab
+        if "youtube.com/playlist" in url or ("youtube.com" in url and "list=" in url):
+            self.playlist_url_entry.delete(0, "end")
+            self.playlist_url_entry.insert(0, url)
+            self.select_tab("playlist")
+            self.fetch_playlist_info()
+            return
+
+        self.universal_fetch_btn.configure(state="disabled", text="Analyzing...")
+        self.universal_status_lbl.configure(text="Connecting and extracting video info...", text_color="#38bdf8")
+        auth_config = self._get_auth_config()
+
+        def worker():
+            try:
+                data = ytdlp_service.extract_universal_video_info(url, auth_config)
+                self.after(0, lambda: self._on_universal_fetched(data))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self._on_universal_error(err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_universal_fetched(self, data):
+        self.universal_fetch_btn.configure(state="normal", text="🔍 Analyze")
+        self.universal_video_data = data
+
+        title    = data.get('title', 'Unknown')
+        uploader = data.get('uploader', '')
+        duration = data.get('duration_str', '')
+        views    = data.get('view_count', '')
+        extractor = data.get('extractor', 'Unknown Site')
+
+        meta_parts = []
+        if uploader: meta_parts.append(uploader)
+        if duration: meta_parts.append(f"🕐 {duration}")
+        if views and views != 'N/A': meta_parts.append(f"👁 {views} views")
+
+        self.universal_status_lbl.configure(
+            text=f"✓ Video found on {extractor} — {len(data.get('video_formats', []))} resolutions, {len(data.get('audio_formats', []))} audio streams available.",
+            text_color="#34d399"
+        )
+
+        self.universal_site_badge.configure(text=f"  {extractor}  ")
+        self.universal_title_lbl.configure(text=title[:100])
+        self.universal_meta_lbl.configure(text="   •   ".join(meta_parts))
+
+        # Show result card
+        if not self.universal_result_card.winfo_ismapped():
+            self.universal_result_card.pack(fill="x", padx=16, pady=(0, 16))
+
+        # Hide advanced panel on new fetch
+        self.universal_adv_visible = False
+        self.universal_adv_frame.pack_forget()
+        self.universal_adv_btn.configure(text="▶ Advanced Options (resolutions & audio streams)")
+
+        # Populate advanced format panels
+        self._render_universal_formats(data)
+
+    def _on_universal_error(self, err):
+        self.universal_fetch_btn.configure(state="normal", text="🔍 Analyze")
+        short_err = err[:120] if len(err) > 120 else err
+        self.universal_status_lbl.configure(
+            text=f"Failed to analyze: {short_err}",
+            text_color="#f87171"
+        )
+
+    def _render_universal_formats(self, data):
+        # Clear previous format rows
+        for w in self.universal_video_formats_frame.winfo_children():
+            w.destroy()
+        for w in self.universal_audio_formats_frame.winfo_children():
+            w.destroy()
+
+        video_fmts = data.get('video_formats', [])
+        audio_fmts = data.get('audio_formats', [])
+
+        if not video_fmts:
+            ctk.CTkLabel(
+                self.universal_video_formats_frame,
+                text="No separate video streams found (video may be audio-only or merged).",
+                font=ctk.CTkFont(size=11), text_color="#64748b"
+            ).pack(anchor="w", pady=4)
+        else:
+            for fmt in video_fmts:
+                row = ctk.CTkFrame(self.universal_video_formats_frame, fg_color="#0f172a", corner_radius=6, border_width=1, border_color="#1f2937")
+                row.pack(fill="x", pady=3)
+
+                ctk.CTkLabel(
+                    row, text=fmt['label'],
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color="#f1f5f9", width=160, anchor="w"
+                ).pack(side="left", padx=(12, 8), pady=8)
+
+                ctk.CTkLabel(
+                    row, text=f"~{fmt['size_str']}",
+                    font=ctk.CTkFont(size=11), text_color="#94a3b8", width=100
+                ).pack(side="left", padx=4)
+
+                ctk.CTkLabel(
+                    row, text=fmt['codec'][:20] if fmt['codec'] else '',
+                    font=ctk.CTkFont(size=10), text_color="#475569"
+                ).pack(side="left", padx=4)
+
+                def make_vid_dl(f=fmt):
+                    return lambda: self._universal_download_specific(f['format_id'], 'video', 'mp4', f['label'])
+
+                ctk.CTkButton(
+                    row, text="⬇ MP4", width=75, height=28,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    fg_color="#1f2937", hover_color="#7c3aed",
+                    command=make_vid_dl()
+                ).pack(side="right", padx=(4, 10), pady=6)
+
+        if not audio_fmts:
+            ctk.CTkLabel(
+                self.universal_audio_formats_frame,
+                text="No separate audio streams found.",
+                font=ctk.CTkFont(size=11), text_color="#64748b"
+            ).pack(anchor="w", pady=4)
+        else:
+            for fmt in audio_fmts:
+                row = ctk.CTkFrame(self.universal_audio_formats_frame, fg_color="#0f172a", corner_radius=6, border_width=1, border_color="#1f2937")
+                row.pack(fill="x", pady=3)
+
+                ext_upper = (fmt.get('ext') or 'audio').upper()
+                ctk.CTkLabel(
+                    row, text=ext_upper,
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color="#34d399", width=60, anchor="w"
+                ).pack(side="left", padx=(12, 8), pady=8)
+
+                abr = fmt.get('abr', 0)
+                abr_str = f"{int(abr)}kbps" if abr else ""
+                ctk.CTkLabel(
+                    row, text=f"{abr_str}   ~{fmt.get('size', 'Unknown')}",
+                    font=ctk.CTkFont(size=11), text_color="#94a3b8"
+                ).pack(side="left", padx=4)
+
+                # MP3 extract button
+                def make_mp3(f=fmt):
+                    return lambda: self._universal_download_specific(f['format_id'], 'audio', 'mp3', 'MP3 320k')
+                ctk.CTkButton(
+                    row, text="🎵 MP3", width=70, height=28,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    fg_color="#1f2937", hover_color="#059669",
+                    command=make_mp3()
+                ).pack(side="right", padx=(4, 4), pady=6)
+
+                # Original format button
+                def make_orig(f=fmt):
+                    return lambda: self._universal_download_specific(f['format_id'], 'audio', f.get('ext', 'mp3'), f.get('ext', 'audio').upper())
+                ctk.CTkButton(
+                    row, text=f"⬇ {ext_upper}", width=70, height=28,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    fg_color="#1f2937", hover_color="#334155",
+                    command=make_orig()
+                ).pack(side="right", padx=(4, 4), pady=6)
+
+    def _toggle_universal_advanced(self):
+        self.universal_adv_visible = not self.universal_adv_visible
+        if self.universal_adv_visible:
+            self.universal_adv_frame.pack(fill="x", padx=16, pady=(4, 14))
+            self.universal_adv_btn.configure(text="▼ Advanced Options (resolutions & audio streams)")
+        else:
+            self.universal_adv_frame.pack_forget()
+            self.universal_adv_btn.configure(text="▶ Advanced Options (resolutions & audio streams)")
+
+    def universal_start_download(self):
+        if not self.universal_video_data:
+            return
+        url = self.universal_video_data.get('webpage_url', self.universal_url_entry.get().strip())
+        fmt_choice = self.universal_fmt_menu.get()
+
+        if "MP3" in fmt_choice:
+            dl_type, format_id, ext, lbl = 'audio', 'bestaudio/best', 'mp3', 'Best Audio MP3'
+        elif "M4A" in fmt_choice:
+            dl_type, format_id, ext, lbl = 'audio', 'bestaudio/best', 'm4a', 'Best Audio M4A'
+        elif "Original" in fmt_choice:
+            dl_type, format_id, ext, lbl = 'video', 'best', 'mp4', 'Best Original'
+        else:
+            dl_type, format_id, ext, lbl = 'video', 'bestvideo+bestaudio/best', 'mp4', 'Best Video MP4'
+
+        self._universal_download_specific(format_id, dl_type, ext, lbl)
+
+    def _universal_download_specific(self, format_id, dl_type, ext, label):
+        if not self.universal_video_data:
+            return
+        url = self.universal_video_data.get('webpage_url', self.universal_url_entry.get().strip())
+        title = self.universal_video_data.get('title', 'Video')
+        auth_config = self._get_auth_config()
+
+        self.universal_dl_btn.configure(state="disabled", text="Downloading...")
+        self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
+        self.dock_title_lbl.configure(text=f"Downloading: {title[:45]}... [{label}]")
+        self.dock_status_lbl.configure(text="Initializing download...")
+        self.dock_percent_lbl.configure(text="0%")
+        self.dock_progress.set(0.0)
+        self.dock_cancel_btn.configure(state="normal", text="✕ Cancel Download")
+
+        task_id = ytdlp_service.start_download_task(
+            url=url,
+            download_type=dl_type,
+            format_id=format_id,
+            audio_ext=ext,
+            auth_config=auth_config,
+            quality_label=label
+        )
+        self.active_task_id = task_id
+        self.tracking_active = True
+
+        def monitor():
+            while self.tracking_active:
+                t = ytdlp_service.get_task_status(task_id)
+                if not t:
+                    break
+                st  = t.get('status')
+                pct = t.get('progress', 0.0)
+                spd = t.get('speed', '')
+                eta = t.get('eta', '')
+                self.after(0, lambda p=pct/100, pi=int(pct), s=spd, e=eta, st2=st: self._update_dock_ui(p, pi, s, e, st2))
+
+                if st == 'completed':
+                    self.after(0, lambda: (
+                        self.universal_dl_btn.configure(state="normal", text="⬇ Download"),
+                        self.dock_status_lbl.configure(text=f"✓ Saved to downloads folder!"),
+                    ))
+                    break
+                elif st in ['error', 'cancelled']:
+                    err_msg = t.get('error', 'Unknown error')
+                    self.after(0, lambda m=err_msg: (
+                        self.universal_dl_btn.configure(state="normal", text="⬇ Download"),
+                        self.universal_status_lbl.configure(text=f"Download failed: {m}", text_color="#f87171"),
+                    ))
+                    break
+                time.sleep(0.5)
+
+        threading.Thread(target=monitor, daemon=True).start()
+
+    # ==========================================
+    # TAB 4: LINK GRABBER & BULK DOWNLOADER
+    # ==========================================
+
     def _build_link_grabber_frame(self):
         container = ctk.CTkScrollableFrame(self.content_area, fg_color="transparent")
 

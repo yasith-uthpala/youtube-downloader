@@ -723,3 +723,127 @@ def start_direct_download_task(
     )
     t.start()
     return task_id
+
+# ====================================================
+# UNIVERSAL VIDEO DOWNLOADER (any yt-dlp supported site)
+# ====================================================
+
+def extract_universal_video_info(url: str, auth_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Extracts video info from ANY yt-dlp supported site.
+    Returns: title, uploader, duration, thumbnail, extractor (site name),
+             all video formats with heights/fps, all audio formats.
+    """
+    ydl_opts = get_base_ydl_opts(auth_config)
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    title       = info.get('title')        or info.get('fulltitle', 'Unknown Title')
+    uploader    = info.get('uploader')     or info.get('channel')     or info.get('creator', '')
+    duration    = info.get('duration', 0) or 0
+    thumbnail   = info.get('thumbnail')
+    extractor   = info.get('extractor_key') or info.get('ie_key', 'Unknown')
+    webpage_url = info.get('webpage_url', url)
+    description = (info.get('description') or '')[:200]
+    view_count  = info.get('view_count', 0)
+    like_count  = info.get('like_count', 0)
+    upload_date = info.get('upload_date', '')
+
+    formats = info.get('formats', [])
+
+    # ---- Collect best audio size/bitrate for size estimation ----
+    best_audio_size = 0
+    best_audio_abr  = 128
+
+    audio_formats = []
+    seen_audio_exts = set()
+
+    for f in formats:
+        if f.get('vcodec') == 'none' and f.get('acodec') not in (None, 'none'):
+            abr  = f.get('abr') or 0
+            size = f.get('filesize') or f.get('filesize_approx') or 0
+            ext  = f.get('ext', 'audio')
+            if size > best_audio_size:
+                best_audio_size = size
+                best_audio_abr  = abr or 128
+            if ext not in seen_audio_exts:
+                seen_audio_exts.add(ext)
+                audio_formats.append({
+                    'format_id': f.get('format_id', ''),
+                    'ext': ext,
+                    'abr': abr,
+                    'size': format_bytes(size) if size else 'Unknown',
+                    'codec': f.get('acodec', ''),
+                })
+
+    # ---- Collect unique video formats by height ----
+    video_formats = []
+    seen_heights  = set()
+
+    for f in formats:
+        if f.get('vcodec') in (None, 'none'):
+            continue
+        height = f.get('height') or 0
+        if not height or height < 90:
+            continue
+        if height in seen_heights:
+            continue
+        seen_heights.add(height)
+
+        fps    = f.get('fps') or 0
+        fps_int = round(fps) if fps else 0
+        size_v = f.get('filesize') or f.get('filesize_approx') or 0
+        total_size = (size_v + best_audio_size) if size_v > 0 else 0
+
+        if total_size == 0 and duration:
+            vbr = f.get('vbr') or f.get('tbr') or 0
+            if vbr:
+                total_size = ((vbr + best_audio_abr) * 1000 / 8) * duration
+
+        # Resolution label
+        if height >= 2160:
+            res_lbl = '4K Ultra HD'
+        elif height >= 1440:
+            res_lbl = '2K Quad HD'
+        elif height >= 1080:
+            res_lbl = '1080p Full HD'
+        elif height >= 720:
+            res_lbl = '720p HD'
+        elif height >= 480:
+            res_lbl = '480p SD'
+        elif height >= 360:
+            res_lbl = '360p'
+        else:
+            res_lbl = f'{height}p'
+
+        label = f"{res_lbl}" + (f" {fps_int}fps" if fps_int > 30 else "")
+        video_formats.append({
+            'format_id': f"bestvideo[height<={height}]+bestaudio/best[height<={height}]",
+            'height': height,
+            'fps': fps_int,
+            'label': label,
+            'size_str': format_bytes(total_size) if total_size else 'Unknown',
+            'codec': f.get('vcodec', ''),
+            'ext': f.get('ext', 'mp4'),
+        })
+
+    # Sort highest quality first
+    video_formats.sort(key=lambda x: x['height'], reverse=True)
+
+    return {
+        'title': title,
+        'uploader': uploader,
+        'duration': duration,
+        'duration_str': format_duration(duration),
+        'thumbnail': thumbnail,
+        'extractor': extractor,
+        'webpage_url': webpage_url,
+        'description': description,
+        'view_count': f"{view_count:,}" if view_count else 'N/A',
+        'like_count': f"{like_count:,}" if like_count else 'N/A',
+        'upload_date': upload_date,
+        'video_formats': video_formats,
+        'audio_formats': audio_formats,
+        'has_video': len(video_formats) > 0,
+    }
