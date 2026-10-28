@@ -45,6 +45,10 @@ class DownloadCancelledException(Exception):
     """Raised when a download is cancelled by user."""
     pass
 
+class DownloadPausedException(Exception):
+    """Raised when a download is paused by user."""
+    pass
+
 # In-memory download task tracker
 tasks: Dict[str, Dict[str, Any]] = {}
 tasks_lock = threading.Lock()
@@ -139,10 +143,14 @@ def format_bytes(bytes_val: Optional[float]) -> str:
     s = round(bytes_val / p, 1)
     return f"{s} {units[i]}"
 
-def format_duration(seconds: Optional[int]) -> str:
+def format_duration(seconds: Optional[Union[int, float]]) -> str:
     if not seconds:
         return "00:00"
-    m, s = divmod(seconds, 60)
+    try:
+        total_sec = int(round(float(seconds)))
+    except (ValueError, TypeError):
+        return "00:00"
+    m, s = divmod(total_sec, 60)
     h, m = divmod(m, 60)
     if h > 0:
         return f"{h:02d}:{m:02d}:{s:02d}"
@@ -294,14 +302,21 @@ def clean_task_files(task_id: str, folder: Optional[str] = None):
     if folder and folder not in folders_to_check and os.path.isdir(folder):
         folders_to_check.append(folder)
     with tasks_lock:
-        dest = tasks.get(task_id, {}).get('destination_dir')
+        task = tasks.get(task_id, {})
+        dest = task.get('destination_dir')
         if dest and dest not in folders_to_check and os.path.isdir(dest):
             folders_to_check.append(dest)
+        tag = task.get('tag', '')
 
     for fdir in folders_to_check:
         try:
             for fname in os.listdir(fdir):
+                is_match = False
                 if fname.startswith(task_id):
+                    is_match = True
+                elif tag and tag in fname and fname.endswith(('.part', '.ytdl', '.temp')):
+                    is_match = True
+                if is_match:
                     file_to_del = os.path.join(fdir, fname)
                     try:
                         if os.path.isfile(file_to_del):
@@ -325,11 +340,101 @@ def cancel_task(task_id: str) -> bool:
     threading.Thread(target=clean_task_files, args=(task_id,), daemon=True).start()
     return True
 
-def _download_worker(task_id: str, url: str, download_type: str, format_id: str, audio_ext: str, auth_config: Optional[Dict[str, Any]], destination_dir: Optional[str] = None):
+def pause_task(task_id: str) -> bool:
+    """Pauses a running download task gracefully without deleting partial files."""
+    with tasks_lock:
+        if task_id not in tasks:
+            return False
+        tasks[task_id]['paused'] = True
+        tasks[task_id]['status'] = 'pausing'
+        tasks[task_id]['message'] = 'Pausing download...'
+    return True
+
+def resume_task(task_id: str) -> bool:
+    """Resumes a paused or interrupted download task from where it stopped."""
+    with tasks_lock:
+        if task_id not in tasks:
+            return False
+        task = tasks[task_id]
+        if task.get('status') == 'downloading':
+            return True
+        task['paused'] = False
+        task['cancelled'] = False
+        task['error'] = None
+        task['status'] = 'queued'
+        task['message'] = 'Resuming download...'
+
+    t = threading.Thread(
+        target=_download_worker,
+        args=(
+            task_id,
+            task['url'],
+            task['type'],
+            task['format_id'],
+            task.get('audio_ext', 'mp3'),
+            task.get('auth_config'),
+            task.get('destination_dir'),
+            task.get('quality_label', '')
+        ),
+        daemon=True
+    )
+    t.start()
+    return True
+
+def restart_task(task_id: str) -> bool:
+    """Restarts a download from the beginning (removes partial files and begins at 0%)."""
+    with tasks_lock:
+        if task_id not in tasks:
+            return False
+        task = tasks[task_id]
+        task['cancelled'] = True
+
+    time.sleep(0.3)
+    clean_task_files(task_id)
+
+    with tasks_lock:
+        task['paused'] = False
+        task['cancelled'] = False
+        task['error'] = None
+        task['status'] = 'queued'
+        task['progress'] = 0.0
+        task['downloaded_bytes'] = 0
+        task['speed'] = '0 KB/s'
+        task['eta'] = '--'
+        task['message'] = 'Restarting from beginning...'
+
+    t = threading.Thread(
+        target=_download_worker,
+        args=(
+            task_id,
+            task['url'],
+            task['type'],
+            task['format_id'],
+            task.get('audio_ext', 'mp3'),
+            task.get('auth_config'),
+            task.get('destination_dir'),
+            task.get('quality_label', '')
+        ),
+        daemon=True
+    )
+    t.start()
+    return True
+
+def _download_worker(
+    task_id: str,
+    url: str,
+    download_type: str,
+    format_id: str,
+    audio_ext: str,
+    auth_config: Optional[Dict[str, Any]],
+    destination_dir: Optional[str] = None,
+    quality_label: str = ""
+):
     with tasks_lock:
         tasks[task_id]['status'] = 'downloading'
-        tasks[task_id]['progress'] = 0.0
-        tasks[task_id]['message'] = 'Initializing download...'
+        tasks[task_id]['paused'] = False
+        tasks[task_id]['cancelled'] = False
+        tasks[task_id]['message'] = 'Connecting and preparing download...'
 
     def progress_hook(d):
         with tasks_lock:
@@ -337,6 +442,8 @@ def _download_worker(task_id: str, url: str, download_type: str, format_id: str,
                 return
             if tasks[task_id].get('cancelled'):
                 raise DownloadCancelledException("Download cancelled by user.")
+            if tasks[task_id].get('paused'):
+                raise DownloadPausedException("Download paused by user.")
                 
             status = d.get('status')
             if status == 'downloading':
@@ -346,7 +453,7 @@ def _download_worker(task_id: str, url: str, download_type: str, format_id: str,
                 if total > 0:
                     percent = round((downloaded / total) * 100, 1)
                 else:
-                    percent = 0.0
+                    percent = tasks[task_id].get('progress', 0.0)
                     
                 speed = d.get('speed')
                 speed_str = format_bytes(speed) + "/s" if speed else "Calculating..."
@@ -362,19 +469,37 @@ def _download_worker(task_id: str, url: str, download_type: str, format_id: str,
                 
             elif status == 'finished':
                 tasks[task_id]['status'] = 'processing'
-                tasks[task_id]['progress'] = 98.0
+                tasks[task_id]['progress'] = 99.0
                 tasks[task_id]['message'] = 'Merging video and audio with FFmpeg...'
 
     ydl_opts = get_base_ydl_opts(auth_config)
     ydl_opts['progress_hooks'] = [progress_hook]
     ydl_opts['quiet'] = False
     
+    # Robust retry and resume options (handles HTTP 503, connection drops, and reconnects)
+    ydl_opts['retries'] = 25
+    ydl_opts['fragment_retries'] = 30
+    ydl_opts['skip_unavailable_fragments'] = False
+    ydl_opts['continuedl'] = True
+    ydl_opts['socket_timeout'] = 30
+    ydl_opts['retry_sleep_functions'] = {'http': lambda n: 3, 'fragment': lambda n: 2}
+
     save_folder = destination_dir if destination_dir else DOWNLOADS_DIR
     try:
         os.makedirs(save_folder, exist_ok=True)
     except Exception:
         save_folder = DOWNLOADS_DIR
-    outtmpl = os.path.join(save_folder, f"{task_id}_%(title).100s.%(ext)s")
+
+    # Build unique, stable filename tag based on quality/format
+    ql = quality_label or format_id or 'media'
+    tag = re.sub(r'[^\w\-]', '_', ql).strip('_')[:25]
+    if not tag:
+        tag = 'download'
+    with tasks_lock:
+        tasks[task_id]['tag'] = tag
+
+    # Stable template using title, id, and tag so retries/resumes use the EXACT same file
+    outtmpl = os.path.join(save_folder, f"%(title).100s [%(id)s_{tag}].%(ext)s")
     ydl_opts['outtmpl'] = outtmpl
 
     if download_type == 'video':
@@ -409,21 +534,43 @@ def _download_worker(task_id: str, url: str, download_type: str, format_id: str,
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            video_title = info.get('title', 'video')
 
         with tasks_lock:
             if tasks[task_id].get('cancelled'):
                 clean_task_files(task_id, save_folder)
                 return
+            if tasks[task_id].get('paused'):
+                return
 
+        # Locate completed file
+        target_file = ydl.prepare_filename(info) if info else None
+        base_no_ext = os.path.splitext(target_file)[0] if target_file else None
+        
+        possible_files = []
+        if target_file:
+            possible_files.extend([
+                target_file,
+                base_no_ext + '.mp4',
+                base_no_ext + f'.{audio_ext}',
+                base_no_ext + '.mkv',
+                base_no_ext + '.webm',
+            ])
+            
         matched_file = None
-        for filename in os.listdir(save_folder):
-            if filename.startswith(task_id) and not filename.endswith('.part'):
-                matched_file = os.path.join(save_folder, filename)
+        for pf in possible_files:
+            if os.path.exists(pf) and not pf.endswith(('.part', '.ytdl', '.temp')):
+                matched_file = pf
                 break
 
+        if not matched_file:
+            # Fallback search by tag in save_folder
+            for filename in os.listdir(save_folder):
+                if tag in filename and not filename.endswith(('.part', '.ytdl', '.temp')):
+                    matched_file = os.path.join(save_folder, filename)
+                    break
+
         if matched_file and os.path.exists(matched_file):
-            display_name = os.path.basename(matched_file).replace(f"{task_id}_", "")
+            display_name = os.path.basename(matched_file)
             file_size = os.path.getsize(matched_file)
             with tasks_lock:
                 tasks[task_id]['status'] = 'completed'
@@ -436,19 +583,35 @@ def _download_worker(task_id: str, url: str, download_type: str, format_id: str,
         else:
             raise Exception("Output file was not found after processing.")
 
+    except DownloadPausedException:
+        with tasks_lock:
+            tasks[task_id]['status'] = 'paused'
+            pct = tasks[task_id].get('progress', 0.0)
+            tasks[task_id]['message'] = f"Paused at {pct}%"
+            tasks[task_id]['speed'] = '0 KB/s'
+            tasks[task_id]['eta'] = '--'
+
     except DownloadCancelledException:
         clean_task_files(task_id, save_folder)
         with tasks_lock:
             tasks[task_id]['status'] = 'cancelled'
             tasks[task_id]['message'] = 'Download cancelled by user.'
+
     except Exception as e:
         with tasks_lock:
             if tasks[task_id].get('cancelled'):
                 clean_task_files(task_id, save_folder)
                 return
+            if tasks[task_id].get('paused'):
+                return
         err_msg = str(e)
-        if "Sign in to confirm" in err_msg or "confirm you're not a bot" in err_msg:
+        if "503" in err_msg or "Service Unavailable" in err_msg:
+            err_msg = "Connection interrupted (HTTP 503). Click 'Resume' to continue downloading from where it stopped."
+        elif "timed out" in err_msg.lower() or "connection reset" in err_msg.lower():
+            err_msg = "Network timed out. Click 'Resume' to continue."
+        elif "Sign in to confirm" in err_msg or "confirm you're not a bot" in err_msg:
             err_msg = "YouTube anti-bot check triggered. You can enable Login under Settings to capture this video."
+
         with tasks_lock:
             tasks[task_id]['status'] = 'error'
             tasks[task_id]['message'] = err_msg
@@ -461,7 +624,8 @@ def start_download_task(
     audio_ext: str = "mp3",
     auth_config: Optional[Dict[str, Any]] = None,
     quality_label: str = "",
-    destination_dir: Optional[str] = None
+    destination_dir: Optional[str] = None,
+    title: Optional[str] = None
 ) -> str:
     """Spawns an asynchronous download task and returns its task_id."""
     task_id = str(uuid.uuid4())[:8]
@@ -469,8 +633,11 @@ def start_download_task(
         tasks[task_id] = {
             'task_id': task_id,
             'url': url,
+            'title': title or 'Video',
             'type': download_type,
             'format_id': format_id,
+            'audio_ext': audio_ext,
+            'auth_config': auth_config,
             'quality_label': quality_label,
             'destination_dir': destination_dir,
             'status': 'queued',
@@ -480,6 +647,7 @@ def start_download_task(
             'message': 'Queued...',
             'error': None,
             'cancelled': False,
+            'paused': False,
             'file_path': None,
             'filename': None,
             'filesize': 0,
@@ -489,7 +657,7 @@ def start_download_task(
 
     t = threading.Thread(
         target=_download_worker,
-        args=(task_id, url, download_type, format_id, audio_ext, auth_config, destination_dir),
+        args=(task_id, url, download_type, format_id, audio_ext, auth_config, destination_dir, quality_label),
         daemon=True
     )
     t.start()
@@ -728,23 +896,139 @@ def start_direct_download_task(
 # UNIVERSAL VIDEO DOWNLOADER (any yt-dlp supported site)
 # ====================================================
 
+def _scrape_fallback_url(page_url: str) -> Optional[str]:
+    """
+    Fallback for unsupported sites: fetches the page HTML and tries to find
+    an embedded iframe video player or direct m3u8/mp4 URL.
+    Returns the best URL to try with yt-dlp, or None.
+    """
+    import urllib.request
+    import urllib.parse
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+    try:
+        req = urllib.request.Request(page_url, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=12)
+        html = resp.read().decode('utf-8', errors='ignore')
+        final_url = resp.url  # in case of redirect
+        base_domain = urllib.parse.urlparse(final_url).scheme + '://' + urllib.parse.urlparse(final_url).netloc
+    except Exception:
+        return None
+
+    # 1. Direct m3u8 streams (highest priority — yt-dlp handles HLS natively)
+    m3u8s = re.findall(r'["\']([^"\']+\.m3u8[^"\']*)["\']', html, re.IGNORECASE)
+    if m3u8s:
+        best = m3u8s[0]
+        if best.startswith('//'):
+            best = 'https:' + best
+        elif best.startswith('/'):
+            best = base_domain + best
+        return best
+
+    # 2. Direct mp4/webm/ogg video URLs
+    direct_media = re.findall(r'["\']([^"\']+\.(?:mp4|webm|ogg)[^"\']*)["\']', html, re.IGNORECASE)
+    for dm in direct_media:
+        if dm.startswith('http') and not dm.endswith('.js') and not dm.endswith('.css'):
+            return dm
+
+    # 3. Embedded iframes — recurse one level deep
+    iframes = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    for iframe_src in iframes:
+        # Skip ad/tracker iframes
+        skip = ['doubleclick', 'googlesyndication', 'advertising', 'analytics',
+                'facebook.com/plugins', 'twitter.com/widgets', 'disqus']
+        if any(s in iframe_src.lower() for s in skip):
+            continue
+        if iframe_src.startswith('//'):
+            iframe_src = 'https:' + iframe_src
+        elif iframe_src.startswith('/'):
+            iframe_src = base_domain + iframe_src
+        # Try yt-dlp on the iframe URL first
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
+                ydl.extract_info(iframe_src, download=False)
+            return iframe_src  # yt-dlp can handle this iframe
+        except Exception:
+            pass
+        # Scrape the iframe page for m3u8
+        try:
+            req2 = urllib.request.Request(iframe_src, headers={**headers, 'Referer': page_url})
+            resp2 = urllib.request.urlopen(req2, timeout=10)
+            html2 = resp2.read().decode('utf-8', errors='ignore')
+            m3u8s2 = re.findall(r'["\']([^"\']+\.m3u8[^"\']*)["\']', html2, re.IGNORECASE)
+            if m3u8s2:
+                m = m3u8s2[0]
+                if m.startswith('//'):
+                    m = 'https:' + m
+                return m
+            direct2 = re.findall(r'["\']([^"\']+\.(?:mp4|webm)[^"\']*)["\']', html2, re.IGNORECASE)
+            for dm2 in direct2:
+                if dm2.startswith('http'):
+                    return dm2
+        except Exception:
+            pass
+
+    return None
+
+
 def extract_universal_video_info(url: str, auth_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Extracts video info from ANY yt-dlp supported site.
+    Falls back to iframe/m3u8 extraction for sites not natively supported.
     Returns: title, uploader, duration, thumbnail, extractor (site name),
              all video formats with heights/fps, all audio formats.
     """
     ydl_opts = get_base_ydl_opts(auth_config)
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    # Strategy 1: Try yt-dlp directly
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as primary_err:
+        # Strategy 2: Fallback — scrape page for embedded video/m3u8
+        err_str = str(primary_err)
+        if 'Unsupported URL' in err_str or 'Unable to extract' in err_str or 'No video formats' in err_str:
+            fallback_url = _scrape_fallback_url(url)
+            if fallback_url:
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(fallback_url, download=False)
+                    # Override webpage_url with the original so result card shows correct link
+                    info['_original_url'] = url
+                    info['_resolved_via'] = fallback_url
+                except Exception as fallback_err:
+                    raise Exception(
+                        f"Site not directly supported and fallback extraction failed.\n"
+                        f"Primary: {err_str[:120]}\n"
+                        f"Fallback tried: {fallback_url}\n"
+                        f"Fallback error: {str(fallback_err)[:120]}"
+                    )
+            else:
+                raise Exception(
+                    f"Site not supported by yt-dlp and no embedded video player was found on the page.\n"
+                    f"Error: {err_str[:200]}"
+                )
+        else:
+            raise
 
-    title       = info.get('title')        or info.get('fulltitle', 'Unknown Title')
-    uploader    = info.get('uploader')     or info.get('channel')     or info.get('creator', '')
+    title       = info.get('title') or info.get('fulltitle') or 'Unknown Title'
+    # m3u8 streams often just return 'master' as title — use original URL as fallback title
+    if title in ('master', 'Master', ''):
+        title = 'Video'
+    uploader    = info.get('uploader') or info.get('channel') or info.get('creator', '')
     duration    = info.get('duration', 0) or 0
     thumbnail   = info.get('thumbnail')
     extractor   = info.get('extractor_key') or info.get('ie_key', 'Unknown')
-    webpage_url = info.get('webpage_url', url)
+    # If resolved via fallback, show source site name from original URL
+    if info.get('_resolved_via'):
+        import urllib.parse
+        netloc = urllib.parse.urlparse(url).netloc.replace('www.', '')
+        extractor = netloc or extractor
+    webpage_url = info.get('_original_url') or info.get('webpage_url', url)
+    resolved_via = info.get('_resolved_via')
     description = (info.get('description') or '')[:200]
     view_count  = info.get('view_count', 0)
     like_count  = info.get('like_count', 0)
@@ -839,6 +1123,9 @@ def extract_universal_video_info(url: str, auth_config: Optional[Dict[str, Any]]
         'thumbnail': thumbnail,
         'extractor': extractor,
         'webpage_url': webpage_url,
+        # The actual URL to pass to start_download_task (may differ from webpage_url for fallback cases)
+        'download_url': resolved_via if resolved_via else webpage_url,
+        'resolved_via': resolved_via,
         'description': description,
         'view_count': f"{view_count:,}" if view_count else 'N/A',
         'like_count': f"{like_count:,}" if like_count else 'N/A',

@@ -38,6 +38,7 @@ class ModernYouTubeDownloader(ctk.CTk):
         self.active_task_id = None
         self.active_format_key = None
         self.format_states = {}
+        self.active_tasks = {}  # Multi-download task registry: task_id -> task UI & state
         self.tracking_active = False
         self.custom_cookie_file = None
         self.active_download_url = None
@@ -153,71 +154,83 @@ class ModernYouTubeDownloader(ctk.CTk):
         }
 
         # ==========================================
-        # PERSISTENT BOTTOM DOWNLOAD DOCK
+        # PERSISTENT MULTI-DOWNLOAD MANAGER DOCK
         # ==========================================
         self.bottom_dock = ctk.CTkFrame(self, fg_color="#0f172a", corner_radius=12, border_width=1, border_color="#334155")
-        # Hidden initially; packed dynamically on download start
+        # Hidden initially; gridded dynamically when downloads start
 
-        dock_content = ctk.CTkFrame(self.bottom_dock, fg_color="transparent")
-        dock_content.pack(fill="both", expand=True, padx=16, pady=10)
+        dock_header = ctk.CTkFrame(self.bottom_dock, fg_color="transparent")
+        dock_header.pack(fill="x", padx=14, pady=(8, 4))
 
-        dock_top = ctk.CTkFrame(dock_content, fg_color="transparent")
-        dock_top.pack(fill="x", pady=(0, 6))
+        dock_hl = ctk.CTkFrame(dock_header, fg_color="transparent")
+        dock_hl.pack(side="left")
 
-        self.dock_title_lbl = ctk.CTkLabel(
-            dock_top,
-            text="Downloading video...",
-            font=ctk.CTkFont(size=12, weight="bold"),
+        ctk.CTkLabel(
+            dock_hl,
+            text="📥  Active Downloads",
+            font=ctk.CTkFont(size=13, weight="bold"),
             text_color="#ffffff"
-        )
-        self.dock_title_lbl.pack(side="left")
+        ).pack(side="left", padx=(0, 8))
 
-        self.dock_percent_lbl = ctk.CTkLabel(
-            dock_top,
-            text="0%",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#f59e0b"
-        )
-        self.dock_percent_lbl.pack(side="right")
-
-        self.dock_progress = ctk.CTkProgressBar(dock_content, height=10, progress_color="#ef4444")
-        self.dock_progress.set(0.0)
-        self.dock_progress.pack(fill="x", pady=(0, 6))
-
-        dock_bottom = ctk.CTkFrame(dock_content, fg_color="transparent")
-        dock_bottom.pack(fill="x")
-
-        self.dock_status_lbl = ctk.CTkLabel(
-            dock_bottom,
-            text="Initializing download...",
+        self.dock_count_lbl = ctk.CTkLabel(
+            dock_hl,
+            text="0 active",
             font=ctk.CTkFont(size=11),
             text_color="#94a3b8"
         )
-        self.dock_status_lbl.pack(side="left")
+        self.dock_count_lbl.pack(side="left")
 
-        self.dock_cancel_btn = ctk.CTkButton(
-            dock_bottom,
-            text="✕ Cancel",
-            width=100,
-            height=28,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color="#991b1b",
-            hover_color="#7f1d1d",
-            command=self.cancel_active_download
-        )
-        self.dock_cancel_btn.pack(side="right")
+        dock_hr = ctk.CTkFrame(dock_header, fg_color="transparent")
+        dock_hr.pack(side="right")
 
-        self.dock_browser_btn = ctk.CTkButton(
-            dock_bottom,
-            text="🌐 Open Link in Browser",
-            width=160,
-            height=28,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color="#b45309",
-            hover_color="#d97706",
-            command=self.open_active_in_browser
+        self.dock_clear_btn = ctk.CTkButton(
+            dock_hr,
+            text="Clear Finished",
+            width=95,
+            height=26,
+            font=ctk.CTkFont(size=10),
+            fg_color="#1e293b",
+            hover_color="#334155",
+            command=self._clear_completed_dock_tasks
         )
-        # Hidden by default; packed when Cloudflare challenge is triggered
+        self.dock_clear_btn.pack(side="left", padx=(0, 6))
+
+        self.dock_open_folder_btn = ctk.CTkButton(
+            dock_hr,
+            text="📁 Open Folder",
+            width=90,
+            height=26,
+            font=ctk.CTkFont(size=10),
+            fg_color="#1e293b",
+            hover_color="#334155",
+            command=self.open_downloads_folder
+        )
+        self.dock_open_folder_btn.pack(side="left", padx=(0, 6))
+
+        self.dock_close_btn = ctk.CTkButton(
+            dock_hr,
+            text="✕",
+            width=26,
+            height=26,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="transparent",
+            hover_color="#334155",
+            text_color="#94a3b8",
+            command=lambda: self.bottom_dock.grid_forget()
+        )
+        self.dock_close_btn.pack(side="left")
+
+        # Scrollable container for concurrent download cards
+        self.dock_tasks_scroll = ctk.CTkScrollableFrame(self.bottom_dock, fg_color="transparent", height=125)
+        self.dock_tasks_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+        # Backward-compatibility fallback widgets so any direct references don't fail
+        self.dock_title_lbl = ctk.CTkLabel(self.bottom_dock, text="")
+        self.dock_percent_lbl = ctk.CTkLabel(self.bottom_dock, text="")
+        self.dock_progress = ctk.CTkProgressBar(self.bottom_dock)
+        self.dock_status_lbl = ctk.CTkLabel(self.bottom_dock, text="")
+        self.dock_cancel_btn = ctk.CTkButton(self.bottom_dock, text="", command=self.cancel_active_download)
+        self.dock_browser_btn = ctk.CTkButton(self.bottom_dock, text="", command=self.open_active_in_browser)
 
     def open_active_in_browser(self):
         if self.active_download_url:
@@ -964,7 +977,7 @@ class ModernYouTubeDownloader(ctk.CTk):
     def universal_start_download(self):
         if not self.universal_video_data:
             return
-        url = self.universal_video_data.get('webpage_url', self.universal_url_entry.get().strip())
+        url = self.universal_video_data.get('download_url') or self.universal_video_data.get('webpage_url') or self.universal_url_entry.get().strip()
         fmt_choice = self.universal_fmt_menu.get()
 
         if "MP3" in fmt_choice:
@@ -981,56 +994,18 @@ class ModernYouTubeDownloader(ctk.CTk):
     def _universal_download_specific(self, format_id, dl_type, ext, label):
         if not self.universal_video_data:
             return
-        url = self.universal_video_data.get('webpage_url', self.universal_url_entry.get().strip())
+        url = self.universal_video_data.get('download_url') or self.universal_video_data.get('webpage_url') or self.universal_url_entry.get().strip()
         title = self.universal_video_data.get('title', 'Video')
-        auth_config = self._get_auth_config()
-
-        self.universal_dl_btn.configure(state="disabled", text="Downloading...")
-        self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
-        self.dock_title_lbl.configure(text=f"Downloading: {title[:45]}... [{label}]")
-        self.dock_status_lbl.configure(text="Initializing download...")
-        self.dock_percent_lbl.configure(text="0%")
-        self.dock_progress.set(0.0)
-        self.dock_cancel_btn.configure(state="normal", text="✕ Cancel Download")
-
-        task_id = ytdlp_service.start_download_task(
+        self.start_download(
             url=url,
-            download_type=dl_type,
+            dl_type=dl_type,
             format_id=format_id,
-            audio_ext=ext,
-            auth_config=auth_config,
-            quality_label=label
+            ext=ext,
+            quality_label=label,
+            format_key=f"univ_{format_id}_{ext}",
+            btn=self.universal_dl_btn,
+            custom_title=title
         )
-        self.active_task_id = task_id
-        self.tracking_active = True
-
-        def monitor():
-            while self.tracking_active:
-                t = ytdlp_service.get_task_status(task_id)
-                if not t:
-                    break
-                st  = t.get('status')
-                pct = t.get('progress', 0.0)
-                spd = t.get('speed', '')
-                eta = t.get('eta', '')
-                self.after(0, lambda p=pct/100, pi=int(pct), s=spd, e=eta, st2=st: self._update_dock_ui(p, pi, s, e, st2))
-
-                if st == 'completed':
-                    self.after(0, lambda: (
-                        self.universal_dl_btn.configure(state="normal", text="⬇ Download"),
-                        self.dock_status_lbl.configure(text=f"✓ Saved to downloads folder!"),
-                    ))
-                    break
-                elif st in ['error', 'cancelled']:
-                    err_msg = t.get('error', 'Unknown error')
-                    self.after(0, lambda m=err_msg: (
-                        self.universal_dl_btn.configure(state="normal", text="⬇ Download"),
-                        self.universal_status_lbl.configure(text=f"Download failed: {m}", text_color="#f87171"),
-                    ))
-                    break
-                time.sleep(0.5)
-
-        threading.Thread(target=monitor, daemon=True).start()
 
     # ==========================================
     # TAB 4: LINK GRABBER & BULK DOWNLOADER
@@ -2384,28 +2359,14 @@ class ModernYouTubeDownloader(ctk.CTk):
             self.dock_status_lbl.configure(text=f"Error: {err}")
 
     # ==========================================
-    # LOGIC: DOWNLOAD EXECUTION & PROGRESS
+    # LOGIC: MULTI-DOWNLOAD MANAGER & PROGRESS
     # ==========================================
-    def start_download(self, url, dl_type, format_id, ext, quality_label, format_key, btn=None):
-        if self.format_states.get(format_key) == 'downloading':
-            self.status_lbl.configure(text="This quality is already downloading! See active progress bar below.", text_color="#fbbf24")
-            return
-
+    def start_download(self, url, dl_type, format_id, ext, quality_label, format_key, btn=None, custom_title=None):
         if btn:
             btn.configure(text="Downloading...", state="disabled", fg_color="#78350f")
 
         self.format_states[format_key] = 'downloading'
-        self.active_format_key = format_key
-
-        # Show bottom dock
-        self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
-        title = self.current_video_data.get('title', 'Video') if self.current_video_data else 'Media'
-        self.dock_title_lbl.configure(text=f"Downloading: {title[:50]}... [{quality_label}]")
-        self.dock_status_lbl.configure(text="Initializing download with FFmpeg...")
-        self.dock_percent_lbl.configure(text="0%")
-        self.dock_progress.set(0.0)
-        self.dock_cancel_btn.configure(state="normal", text="✕ Cancel Download")
-
+        title = custom_title or (self.current_video_data.get('title', 'Video') if self.current_video_data else 'Video')
         auth_config = self._get_auth_config()
 
         task_id = ytdlp_service.start_download_task(
@@ -2414,79 +2375,343 @@ class ModernYouTubeDownloader(ctk.CTk):
             format_id=format_id,
             audio_ext=ext,
             auth_config=auth_config,
-            quality_label=quality_label
+            quality_label=quality_label,
+            destination_dir=self.download_destination,
+            title=title
         )
-        self.active_task_id = task_id
-        self.tracking_active = True
 
-        threading.Thread(target=self._track_progress, args=(task_id, format_key, btn), daemon=True).start()
+        self._create_task_dock_card(task_id, title, quality_label, format_key, btn)
+        threading.Thread(target=self._monitor_task_progress, args=(task_id,), daemon=True).start()
+        return task_id
 
-    def cancel_active_download(self):
-        if self.active_task_id:
-            ytdlp_service.cancel_task(self.active_task_id)
-            self.dock_status_lbl.configure(text="Download cancelled by user.")
-            self.dock_cancel_btn.configure(state="disabled")
-            self.dock_progress.set(0.0)
-            self.tracking_active = False
+    def _create_task_dock_card(self, task_id, title, quality_label, format_key=None, btn=None):
+        self.bottom_dock.grid(row=1, column=1, sticky="ew", padx=16, pady=(4, 14))
 
-            if self.active_format_key:
-                self.format_states[self.active_format_key] = 'idle'
+        card = ctk.CTkFrame(self.dock_tasks_scroll, fg_color="#030712", corner_radius=8, border_width=1, border_color="#1f2937")
+        card.pack(fill="x", padx=4, pady=3)
 
-            self.after(3000, lambda: self.bottom_dock.grid_forget())
+        # Row 1: Title + Quality badge on left, Percent on right
+        r1 = ctk.CTkFrame(card, fg_color="transparent")
+        r1.pack(fill="x", padx=10, pady=(6, 2))
 
-    def _track_progress(self, task_id, format_key, btn):
-        while self.tracking_active:
+        t_display = (title[:60] + '...') if len(title) > 60 else title
+        title_lbl = ctk.CTkLabel(
+            r1,
+            text=f"🎬 {t_display}  [{quality_label}]",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#f8fafc",
+            anchor="w"
+        )
+        title_lbl.pack(side="left")
+
+        pct_lbl = ctk.CTkLabel(
+            r1,
+            text="0%",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#f59e0b"
+        )
+        pct_lbl.pack(side="right")
+
+        # Row 2: Progress bar
+        prog_bar = ctk.CTkProgressBar(card, height=8, progress_color="#ef4444")
+        prog_bar.set(0.0)
+        prog_bar.pack(fill="x", padx=10, pady=(2, 4))
+
+        # Row 3: Status / Speed / ETA on left, Action buttons on right
+        r3 = ctk.CTkFrame(card, fg_color="transparent")
+        r3.pack(fill="x", padx=10, pady=(0, 6))
+
+        status_lbl = ctk.CTkLabel(
+            r3,
+            text="Connecting & preparing download...",
+            font=ctk.CTkFont(size=11),
+            text_color="#94a3b8",
+            anchor="w"
+        )
+        status_lbl.pack(side="left")
+
+        cancel_btn = ctk.CTkButton(
+            r3,
+            text="✕ Cancel",
+            width=70,
+            height=26,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color="#991b1b",
+            hover_color="#7f1d1d",
+            command=lambda tid=task_id: self._on_card_cancel_clicked(tid)
+        )
+        cancel_btn.pack(side="right", padx=(4, 0))
+
+        restart_btn = ctk.CTkButton(
+            r3,
+            text="🔄 Restart",
+            width=75,
+            height=26,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color="#374151",
+            hover_color="#4b5563",
+            command=lambda tid=task_id: self._on_card_restart_clicked(tid)
+        )
+        restart_btn.pack(side="right", padx=(4, 0))
+
+        pause_btn = ctk.CTkButton(
+            r3,
+            text="⏸ Pause",
+            width=70,
+            height=26,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            command=lambda tid=task_id: self._on_card_pause_resume_clicked(tid)
+        )
+        pause_btn.pack(side="right", padx=(4, 0))
+
+        open_btn = ctk.CTkButton(
+            r3,
+            text="▶ Open File",
+            width=85,
+            height=26,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color="#059669",
+            hover_color="#047857"
+        )
+
+        self.active_tasks[task_id] = {
+            'card': card,
+            'title_lbl': title_lbl,
+            'pct_lbl': pct_lbl,
+            'prog_bar': prog_bar,
+            'status_lbl': status_lbl,
+            'cancel_btn': cancel_btn,
+            'restart_btn': restart_btn,
+            'pause_btn': pause_btn,
+            'open_btn': open_btn,
+            'format_key': format_key,
+            'btn': btn,
+            'is_running': True
+        }
+        self._update_dock_count()
+
+    def _monitor_task_progress(self, task_id):
+        while True:
+            task_info = self.active_tasks.get(task_id)
+            if not task_info or not task_info.get('is_running'):
+                break
+
             task = ytdlp_service.get_task_status(task_id)
             if not task:
                 break
 
             status = task.get('status')
-            pct = task.get('progress', 0.0) / 100.0
-            pct_int = int(task.get('progress', 0.0))
-            speed = task.get('speed', '')
-            eta = task.get('eta', '')
+            self.after(0, lambda tid=task_id, t=task: self._update_task_ui(tid, t))
 
-            self.after(0, lambda p=pct, pi=pct_int, s=speed, e=eta, st=status: self._update_dock_ui(p, pi, s, e, st))
-
-            if status == 'completed':
-                self.after(0, lambda: self._on_download_complete(format_key, btn))
-                break
-            elif status in ['error', 'cancelled']:
-                self.after(0, lambda err=task.get('error', 'Failed'): self._on_download_error(format_key, btn, err))
+            if status in ['completed', 'cancelled']:
+                task_info['is_running'] = False
                 break
 
             time.sleep(0.5)
 
-    def _update_dock_ui(self, pct, pct_int, speed, eta, status):
-        self.dock_progress.set(pct)
-        self.dock_percent_lbl.configure(text=f"{pct_int}%")
+    def _update_task_ui(self, task_id, task):
+        ui = self.active_tasks.get(task_id)
+        if not ui:
+            return
+
+        status = task.get('status')
+        pct = task.get('progress', 0.0)
+        pct_int = int(pct)
+        speed = task.get('speed', '')
+        eta = task.get('eta', '')
+        file_path = task.get('file_path')
 
         if status == 'downloading':
-            self.dock_status_lbl.configure(text=f"Downloading at {speed}   •   ETA: {eta}")
+            ui['prog_bar'].set(pct / 100.0)
+            ui['pct_lbl'].configure(text=f"{pct_int}%", text_color="#f59e0b")
+            ui['status_lbl'].configure(
+                text=f"⚡ {speed}   •   ETA: {eta}   •   Downloading...",
+                text_color="#94a3b8"
+            )
+            ui['pause_btn'].configure(text="⏸ Pause", fg_color="#1f2937", hover_color="#374151")
+
         elif status == 'processing':
-            self.dock_status_lbl.configure(text="Merging video and audio with FFmpeg...")
+            ui['prog_bar'].set(0.99)
+            ui['pct_lbl'].configure(text="99%", text_color="#38bdf8")
+            ui['status_lbl'].configure(
+                text="Merging video and audio with FFmpeg...",
+                text_color="#38bdf8"
+            )
+
+        elif status == 'paused':
+            ui['pct_lbl'].configure(text_color="#fbbf24")
+            ui['status_lbl'].configure(
+                text=f"⏸ Paused at {pct_int}%. Click Resume to continue.",
+                text_color="#fbbf24"
+            )
+            ui['pause_btn'].configure(text="▶ Resume", fg_color="#059669", hover_color="#047857")
+
         elif status == 'completed':
-            self.dock_status_lbl.configure(text="✓ Download complete! Saved to downloads folder.")
+            ui['prog_bar'].set(1.0)
+            ui['prog_bar'].configure(progress_color="#10b981")
+            ui['pct_lbl'].configure(text="100%", text_color="#34d399")
+            size_str = task.get('filesize_str', '')
+            ui['status_lbl'].configure(
+                text=f"✓ Download complete! Saved ({size_str})",
+                text_color="#34d399"
+            )
+            ui['pause_btn'].pack_forget()
+            ui['restart_btn'].pack_forget()
+            ui['cancel_btn'].configure(text="✕ Dismiss", fg_color="#1e293b", hover_color="#334155")
+            if file_path and os.path.exists(file_path):
+                ui['open_btn'].configure(command=lambda fp=file_path: self._open_file(fp))
+                ui['open_btn'].pack(side="right", padx=(4, 0))
+
+            fk = ui.get('format_key')
+            if fk:
+                self.format_states[fk] = 'completed'
+            fmt_btn = ui.get('btn')
+            if fmt_btn:
+                try:
+                    fmt_btn.configure(text="✓ Downloaded", state="normal", fg_color="#064e3b")
+                except Exception:
+                    pass
+            self._update_dock_count()
+
+        elif status == 'error':
+            err = task.get('error', 'Error occurred')
+            ui['pct_lbl'].configure(text_color="#ef4444")
+            ui['status_lbl'].configure(
+                text=f"⚠️ {err[:65]}",
+                text_color="#f87171"
+            )
+            ui['pause_btn'].configure(text="▶ Resume", fg_color="#059669", hover_color="#047857")
+            fk = ui.get('format_key')
+            if fk:
+                self.format_states[fk] = 'idle'
+            fmt_btn = ui.get('btn')
+            if fmt_btn:
+                try:
+                    fmt_btn.configure(text="⬇ Download", state="normal", fg_color="#1f2937")
+                except Exception:
+                    pass
+            self._update_dock_count()
+
+    def _on_card_pause_resume_clicked(self, task_id):
+        task = ytdlp_service.get_task_status(task_id)
+        if not task:
+            return
+        status = task.get('status')
+        if status in ['downloading', 'queued']:
+            ytdlp_service.pause_task(task_id)
+            ui = self.active_tasks.get(task_id)
+            if ui:
+                ui['status_lbl'].configure(text="Pausing...", text_color="#fbbf24")
+                ui['pause_btn'].configure(text="▶ Resume", fg_color="#059669")
+        elif status in ['paused', 'error']:
+            ui = self.active_tasks.get(task_id)
+            if ui:
+                ui['status_lbl'].configure(text="Resuming download...", text_color="#38bdf8")
+                ui['pause_btn'].configure(text="⏸ Pause", fg_color="#1f2937")
+                ui['is_running'] = True
+            ytdlp_service.resume_task(task_id)
+            threading.Thread(target=self._monitor_task_progress, args=(task_id,), daemon=True).start()
+
+    def _on_card_restart_clicked(self, task_id):
+        ui = self.active_tasks.get(task_id)
+        if ui:
+            ui['status_lbl'].configure(text="Restarting from beginning (0%)...", text_color="#fbbf24")
+            ui['prog_bar'].set(0.0)
+            ui['pct_lbl'].configure(text="0%", text_color="#f59e0b")
+            ui['pause_btn'].configure(text="⏸ Pause", fg_color="#1f2937")
+            ui['is_running'] = True
+        ytdlp_service.restart_task(task_id)
+        threading.Thread(target=self._monitor_task_progress, args=(task_id,), daemon=True).start()
+
+    def _on_card_cancel_clicked(self, task_id):
+        ytdlp_service.cancel_task(task_id)
+        self._remove_task_card(task_id)
+
+    def _remove_task_card(self, task_id):
+        ui = self.active_tasks.pop(task_id, None)
+        if ui:
+            ui['is_running'] = False
+            fk = ui.get('format_key')
+            if fk and self.format_states.get(fk) == 'downloading':
+                self.format_states[fk] = 'idle'
+            btn = ui.get('btn')
+            if btn:
+                try:
+                    btn.configure(text="⬇ Download MP4", state="normal", fg_color="#1f2937")
+                except Exception:
+                    pass
+            try:
+                ui['card'].destroy()
+            except Exception:
+                pass
+        self._update_dock_count()
+
+    def _clear_completed_dock_tasks(self):
+        to_remove = []
+        for tid, ui in list(self.active_tasks.items()):
+            t = ytdlp_service.get_task_status(tid)
+            if t and t.get('status') in ['completed', 'cancelled']:
+                to_remove.append(tid)
+        for tid in to_remove:
+            self._remove_task_card(tid)
+
+    def _update_dock_count(self):
+        active_count = 0
+        completed_count = 0
+        for tid in self.active_tasks:
+            t = ytdlp_service.get_task_status(tid)
+            if t:
+                st = t.get('status')
+                if st in ['downloading', 'queued', 'paused', 'processing']:
+                    active_count += 1
+                elif st == 'completed':
+                    completed_count += 1
+        
+        total = len(self.active_tasks)
+        if total == 0:
+            self.bottom_dock.grid_forget()
+        else:
+            txt = f"{active_count} active"
+            if completed_count > 0:
+                txt += f", {completed_count} finished"
+            self.dock_count_lbl.configure(text=txt)
+
+    def _open_file(self, file_path):
+        if file_path and os.path.exists(file_path):
+            try:
+                os.startfile(file_path)
+            except Exception:
+                webbrowser.open(file_path)
+
+    def cancel_active_download(self):
+        for tid in list(self.active_tasks.keys()):
+            ytdlp_service.cancel_task(tid)
+            self._remove_task_card(tid)
+        self.bottom_dock.grid_forget()
+
+    def _update_dock_ui(self, pct, pct_int, speed, eta, status):
+        # Kept for compatibility with batch/playlist loops
+        pass
 
     def _on_download_complete(self, format_key, btn):
-        self.tracking_active = False
-        self.format_states[format_key] = 'completed'
-        self.dock_cancel_btn.configure(text="✓ Completed", state="disabled")
-        self.status_lbl.configure(text="✓ Download complete! File saved in downloads folder.", text_color="#34d399")
-
+        if format_key:
+            self.format_states[format_key] = 'completed'
         if btn:
-            btn.configure(text="✓ Downloaded", state="normal", fg_color="#064e3b")
-
-        self.open_downloads_folder()
+            try:
+                btn.configure(text="✓ Downloaded", state="normal", fg_color="#064e3b")
+            except Exception:
+                pass
 
     def _on_download_error(self, format_key, btn, err):
-        self.tracking_active = False
-        self.format_states[format_key] = 'idle'
-        self.dock_status_lbl.configure(text=f"Error: {err}")
-        self.status_lbl.configure(text=f"Download failed: {err}", text_color="#f87171")
-
+        if format_key:
+            self.format_states[format_key] = 'idle'
         if btn:
-            btn.configure(text="⬇ Download MP4", state="normal", fg_color="#1f2937")
+            try:
+                btn.configure(text="⬇ Download MP4", state="normal", fg_color="#1f2937")
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     try:
